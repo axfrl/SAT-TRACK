@@ -3,8 +3,8 @@ import numpy as np
 import os
 
 # Chemins des fichiers
-input_path = "/home/alphafalcon/Videos/Webcam/2025-04-22-102544.webm"
-output_path = "/home/alphafalcon/Videos/input/2025-04-22-102544.mp4"
+input_path = "/home/alphafalcon/Videos/Camera/Recording from 2025-04-24 14-15-09.068023.webm"
+output_path = "/home/alphafalcon/Videos/input/multi_human.mp4"
 
 # Créer le dossier de sortie s'il n'existe pas
 os.makedirs(os.path.dirname(output_path), exist_ok=True)

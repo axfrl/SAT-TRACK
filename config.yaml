@@ -8,11 +8,11 @@ output_dir: '/home/alphafalcon/Videos/output'
 
 # Inference settings
 infer_batch_size: 1
-infer_num_workers: 4
-distributed_infer: True
-conf_thresh: 0.7
+infer_num_workers: 8
+distributed_infer: False
+conf_thresh: 0.6
 display: False
-live_stream: True
+live_stream: False
 use_fp16: False  # Set to True for FP16
 render_mode: 'points'
 
