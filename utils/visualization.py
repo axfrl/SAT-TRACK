@@ -248,51 +248,45 @@ def render_mesh(height, width, meshes, face, cam_intrinsics, colors = None):
     renderer.delete()
     return rgb, depth
 
-def vis_vertices_img(frame, verts_cam, cam_intrinsics, frame_size, point_radius=2, input_size=1288):
-    """
-    Project SMPL vertices onto the original frame, correcting for depth-dependent shifts.
-    
-    Args:
-        frame: Input frame (numpy array, HxWx3)
-        verts_cam: 3D vertices in camera coordinates (numpy array, Nx3 or 1xNx3)
-        cam_intrinsics: Predicted camera intrinsics for the resized image (torch tensor, 3x3)
-        frame_size: Original frame dimensions (tuple, (width, height), e.g., (1280, 720))
-        point_radius: Radius of rendered points (int)
-        input_size: Model input resolution (int, e.g., 1288)
-    Returns:
-        frame: Frame with vertices rendered (numpy array)
-    """
+def vis_vertices_img(frame, verts_cam_list, cam_intrinsics, frame_size, point_radius=2, input_size=1288):
     frame = frame.copy()
     frame_w, frame_h = frame_size
-    
-    verts = torch.from_numpy(verts_cam).float()
-    if verts.dim() == 3:
-        verts = verts.squeeze(0)
     K = cam_intrinsics.float()
-    
-    verts_homo = verts @ K.T
+
+    # Combiner tous les ensembles de vertices
+    all_verts = torch.cat(
+        [torch.from_numpy(verts).float() if verts.ndim == 2 else torch.from_numpy(verts).float().squeeze(0) 
+         for verts in verts_cam_list], 
+        dim=0
+    )
+
+    # Projection vectorisée
+    verts_homo = all_verts @ K.T
     verts_2d_resized = verts_homo[:, :2] / (verts_homo[:, 2:3] + 1e-6)
-    
+
+    # Ajustements
     orig_w, orig_h = 1280, 720
     padded_h = orig_w
     pad_top = (padded_h - orig_h) // 2
     scale_factor = input_size / padded_h
-    
     expected_cy = input_size / 2
     predicted_cy = K[1, 2]
     cy_offset = (expected_cy - predicted_cy) * (frame_h / (input_size - 2 * pad_top * scale_factor))
-    
-    mean_z = verts[:, 2].mean()
-    depth_adjust = 0
-    
+    depth_adjust = 0  # Peut être ajusté si nécessaire
+
     verts_2d_adjusted = verts_2d_resized.clone()
     verts_2d_adjusted[:, 0] = verts_2d_resized[:, 0] * (frame_w / input_size)
-    verts_2d_adjusted[:, 1] = (verts_2d_resized[:, 1] - pad_top * scale_factor) * (frame_h / (input_size - 2 * pad_top * scale_factor)) + cy_offset + depth_adjust
-    
+    verts_2d_adjusted[:, 1] = (verts_2d_resized[:, 1] - pad_top * scale_factor) * \
+                              (frame_h / (input_size - 2 * pad_top * scale_factor)) + cy_offset + depth_adjust
+
+    # Conversion et clipping
     verts_np = verts_2d_adjusted.cpu().numpy()
     coords = np.clip(verts_np, [0, 0], [frame_w - 1, frame_h - 1]).astype(np.int32)
-    
+
+    # Rendu avec masque
+    mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
     for (x, y) in coords:
-        cv2.circle(frame, (x, y), point_radius, (0, 255, 0), -1)
+        cv2.circle(mask, (x, y), point_radius, 255, -1)
     
+    frame[mask == 255] = [0, 255, 0]
     return frame

@@ -143,26 +143,20 @@ class Engine:
             
             # Pose smoothing (post-processing)
             # TODO
+            t4 = time.time()
 
             # Process outputs
-            depths = outputs['pred_depths'][0, :, 0]
             confs = outputs['pred_confs'][0].view(-1)
             valid_mask = confs > conf_thresh
 
             if valid_mask.any():
-                valid_depths = depths[valid_mask]
-                valid_idxs = torch.arange(depths.shape[0], device=depths.device)[valid_mask]
-                idx = valid_idxs[torch.argmin(valid_depths)].item()
+                valid_verts_list = [outputs['pred_verts'][0, i].detach().cpu().numpy() for i in range(len(confs)) if valid_mask[i]]
+                cam_intrinsics = outputs['pred_intrinsics'][0].reshape(3, 3).detach().cpu()
+                rendered_img = vis_vertices_img(frame, valid_verts_list, cam_intrinsics, (frame_width, frame_height))
             else:
-                idx = torch.argmax(confs).item()
+                rendered_img = frame
 
-            pred_verts = outputs['pred_verts'][0, idx:idx+1].detach().cpu().numpy()
-            cam_intrinsics = outputs['pred_intrinsics'][0].reshape(3, 3).detach().cpu()
 
-            t4 = time.time()
-
-            # Visualize vertices
-            rendered_img = vis_vertices_img(frame, pred_verts, cam_intrinsics, frame_size=(frame_width, frame_height))
             t5 = time.time()
 
             # Put result in queue for writing
