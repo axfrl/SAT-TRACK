@@ -9,18 +9,15 @@ CACHE_DIR = os.path.join(os.environ.get("HOME"), ".cache")  # None if the variab
 
 @dataclass
 class VideoConfig:
-    source: str = MISSING
+    source: str = MISSING  # Must be provided via CLI or YAML
     output_dir: str = 'outputs/'
     extract_video: bool = True
     base_path: Optional[str] = None
     start_frame: int = -1
     end_frame: int = 1300
     useffmpeg: bool = False
-
-    # this will be used if extract_video=False
     start_time: str = '0s'
     end_time: str = '10s'
-
 
 @dataclass
 class PHALPConfig:
@@ -39,10 +36,8 @@ class PHALPConfig:
     shot: int = 0
     start_frame: int = -1
     end_frame: int = 10
-
     small_w: int = 50
     small_h: int = 100
-
 
 @dataclass
 class PosePredictorConfig:
@@ -62,7 +57,7 @@ class HMRConfig:
 @dataclass
 class RenderConfig:
     enable: bool = True
-    type: str = 'HUMAN_MESH' # options: HUMAN_MESH, HUMAN_MASK, HUMAN_BBOX
+    type: str = 'HUMAN_MESH'
     up_scale: int = 2
     res: int = 256
     side_view_each: bool = False
@@ -91,7 +86,6 @@ class SMPLConfig:
     JOINT_REGRESSOR_EXTRA: str = f"{CACHE_DIR}/phalp/3D/SMPL_to_J19.pkl"
     TEXTURE: str = f"{CACHE_DIR}/phalp/3D/texture.npz"
 
-# Config for HMAR
 @dataclass
 class SMPLHeadConfig:
     TYPE: str = 'basic'
@@ -124,6 +118,48 @@ class ExtraConfig:
     FOCAL_LENGTH: int = 5000
 
 @dataclass
+class SATHMRConfig:
+    pretrain: bool = True
+    pretrain_path: str = './weights/sat_hmr/sat_644.pth'
+    infer_batch_size: int = 1
+    infer_num_workers: int = 4
+    distributed_infer: bool = True
+    conf_thresh: float = 0.7
+    display: bool = False
+    live_stream: bool = True
+    use_fp16: bool = False
+    render_mode: str = 'points'
+    input_size: int = 1288
+    encoder: str = 'vitb'
+    hidden_dim: int = 768
+    nheads: int = 4
+    dec_layers: int = 6
+    dim_feedforward: int = 2048
+    dropout: float = 0.0
+    num_queries: int = 50
+    transformer_activation: str = "relu"
+    sat_cfg: Dict = field(default_factory=lambda: {
+        'use_sat': True,
+        'share_patch_embed': False,
+        'preprocess_pos_embed': False,
+        'num_lvls': 3,
+        'lvl_embed': True,
+        'get_map_layer': 3,
+        'use_additional_blocks': True,
+        'conf_thresh': 0.3,
+        'scale_thresh': 0.5
+    })
+    dn_cfg: Dict = field(default_factory=lambda: {
+        'use_dn': True,
+        'dn_number': 10,
+        'tgt_embed_type': "params",
+        'box_noise_scale': 0.4,
+        'tgt_noise_scale': 0.2
+    })
+    mode: str = "infer"
+    gpu_id: int = 0  # Default GPU ID
+
+@dataclass
 class FullConfig:
     seed: int = 42
     track_dataset: str = "demo"
@@ -138,8 +174,6 @@ class FullConfig:
     verbose: bool = False
     detect_shots: bool = False
     video_seq: Optional[str] = None
-
-    # Fields
     video: VideoConfig = field(default_factory=VideoConfig)
     phalp: PHALPConfig = field(default_factory=PHALPConfig)
     pose_predictor: PosePredictorConfig = field(default_factory=PosePredictorConfig)
@@ -150,13 +184,8 @@ class FullConfig:
     SMPL: SMPLConfig = field(default_factory=SMPLConfig)
     MODEL: ModelConfig = field(default_factory=ModelConfig)
     EXTRA: ExtraConfig = field(default_factory=ExtraConfig)
-
-    # tmp configs
-    hmr_type: str = "hmr2018"
-
-    # hydra configs
-    hydra: Dict = field(default_factory = lambda: dict(
-                            mode=hydra.types.RunMode.RUN,
-                            run=dict(dir="${video.output_dir}"),
-                        )
-                    )
+    sathmr: SATHMRConfig = field(default_factory=SATHMRConfig)
+    hydra: Dict = field(default_factory=lambda: dict(
+        mode=hydra.types.RunMode.RUN,
+        run=dict(dir="${video.output_dir}"),
+    ))

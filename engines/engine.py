@@ -7,133 +7,16 @@ from threading import Thread, Event
 import torch.nn.functional as F 
 from .funcs.video_stream_funcs import get_transform, preprocess_frame, create_empty_targets, write_frames
 from utils.visualization import vis_vertices_img
-from tracker.PHALP import PHALP
+#from tracker.PHALP import PHALP
+#from structures.boxes import Boxes
+#from structures.instances import Instances
+#from structures import pairwise_iou
+#from segment_anything import SamPredictor, sam_model_registry
+#from pycocotools import mask as mask_utils
+#from external.deep_sort_.detection import Detection
+#from tracker.SAT_TRACKER import TrackModel
 
 class Engine:
-    class TrackModel(PHALP):
-        def __init(self, cfg, device):
-            super().__init__(cfg)
-
-        def get_detections(self, image, frame_name, t_, additional_data=None, measurements=None):
-            """
-            Get detections using SAT-HMR's prediction head, replacing Detectron2 mask processing.
-            
-            Args:
-                image: Input image (numpy array or PIL Image).
-                frame_name: Frame identifier.
-                t_: Time step (unused here).
-                additional_data: Optional dictionary with ground-truth data.
-                measurements: Tuple (img_height, img_width, new_image_size, left, top).
-            
-            Returns:
-                pred_bbox: Predicted bounding boxes [x1, y1, x2, y2].
-                pred_bbox: Duplicate for compatibility.
-                pred_masks: Synthetic masks or None.
-                pred_scores: Confidence scores.
-                pred_classes: Class IDs (0 for people).
-                ground_truth_track_id: Track IDs.
-                ground_truth_annotations: Annotations.
-            """
-            # Initialize SAT-HMR model (load once during initialization, not here)
-            if not hasattr(self, 'detector'):
-                self.detector = SATHMRModel(
-                    config_path="path/to/sat_hmr/config.yaml",
-                    weights_path="path/to/sat_hmr/weights/sat_644.pth",
-                    device='cuda' if torch.cuda.is_available() else 'cpu'
-                )
-            
-            img_height, img_width = image.shape[:2] if isinstance(image, np.ndarray) else image.size[::-1]
-            
-            if frame_name in additional_data.keys():
-                img_height, img_width, new_image_size, left, top = measurements
-                gt_bbox = additional_data[frame_name]["gt_bbox"]
-                ground_truth_track_id = additional_data[frame_name]["extra_data"].get('gt_track_id', [-1] * len(gt_bbox))
-                ground_truth_annotations = additional_data[frame_name]["extra_data"].get('gt_class', [[]] * len(gt_bbox))
-                
-                inst = Instances((img_height, img_width))
-                bbox_array = []
-                class_array = []
-                scores_array = []
-                
-                # Convert ground-truth boxes to [x1, y1, x2, y2] format
-                for bbox_ in gt_bbox:
-                    x1 = bbox_[0]
-                    y1 = bbox_[1]
-                    x2 = bbox_[2] + x1
-                    y2 = bbox_[3] + y1
-                    bbox_array.append([x1, y1, x2, y2])
-                    class_array.append(0)  # Person class
-                    scores_array.append(1.0)  # Assume max confidence for GT
-                
-                bbox_array = np.array(bbox_array)
-                class_array = np.array(class_array)
-                box = Boxes(torch.as_tensor(bbox_array, dtype=torch.float32))
-                
-                inst.pred_boxes = box
-                inst.pred_classes = torch.as_tensor(class_array, dtype=torch.long)
-                inst.scores = torch.as_tensor(scores_array, dtype=torch.float32)
-                
-                # Run SAT-HMR with provided bounding boxes
-                outputs = self.detector.predict_with_bbox(image, inst)
-                instances = outputs['instances']
-                instances_people = instances[instances.pred_classes == 0]
-                
-                pred_bbox = instances_people.pred_boxes.tensor.cpu().numpy()
-                pred_scores = instances_people.scores.cpu().numpy()
-                pred_classes = instances_people.pred_classes.cpu().numpy()
-                
-                # Generate synthetic masks from bounding boxes
-                pred_masks = self._generate_synthetic_masks(pred_bbox, img_height, img_width)
-            
-            else:
-                # Convert image to tensor for SAT-HMR
-                image_tensor = ToTensor()(image).to(self.detector.device)
-                
-                # Run SAT-HMR inference
-                outputs = self.detector(image_tensor)
-                instances = outputs['instances']
-                instances = instances[instances.pred_classes == 0]
-                instances = instances[instances.scores > self.cfg.phalp.low_th_c]
-                
-                pred_bbox = instances.pred_boxes.tensor.cpu().numpy()
-                pred_scores = instances.scores.cpu().numpy()
-                pred_classes = instances.pred_classes.cpu().numpy()
-                
-                # Generate synthetic masks
-                pred_masks = self._generate_synthetic_masks(pred_bbox, img_height, img_width)
-                
-                ground_truth_track_id = [1] * len(pred_scores)
-                ground_truth_annotations = [[]] * len(pred_scores)
-            
-            return pred_bbox, pred_bbox, pred_masks, pred_scores, pred_classes, ground_truth_track_id, ground_truth_annotations
-
-def _generate_synthetic_masks(self, bboxes, img_height, img_width):
-    """
-    Generate synthetic binary masks from bounding boxes.
-    
-    Args:
-        bboxes: Numpy array of shape (N, 4) with [x1, y1, x2, y2].
-        img_height, img_width: Image dimensions.
-    
-    Returns:
-        masks: Numpy array of shape (N, img_height, img_width) with binary masks.
-    """
-    masks = np.zeros((len(bboxes), img_height, img_width), dtype=np.uint8)
-    for i, bbox in enumerate(bboxes):
-        x1, y1, x2, y2 = map(int, bbox)
-        x1 = max(0, x1)
-        y1 = max(0, y1)
-        x2 = min(img_width, x2)
-        y2 = min(img_height, y2)
-        masks[i, y1:y2, x1:x2] = 1
-    return masks
-
-
-
-
-
-
-
     def __init__(self, args, mode='infer', gpu_id=0):
         self.mode = mode
         self.conf_thresh = args.conf_thresh
@@ -145,8 +28,7 @@ def _generate_synthetic_masks(self, bboxes, img_height, img_width):
         self.device = self.set_device(gpu_id)
         os.makedirs(self.output_dir, exist_ok=True)
         self.prepare_models(args)
-
-
+        #self.phalp_tracker = TrackModel(args, self.device, self.model)
     
     def set_device(self, gpu_id=0):
         """Set device for a specific GPU or CPU."""
@@ -235,6 +117,7 @@ def _generate_synthetic_masks(self, bboxes, img_height, img_width):
             if frame is None:
                 break
             frame_count += 1
+            frame_name = input_video + str(frame_count)
 
             # Preprocess frame
             t1 = time.time()
@@ -250,6 +133,16 @@ def _generate_synthetic_masks(self, bboxes, img_height, img_width):
             with torch.no_grad():
                 outputs = self.model(input_tensor, targets)
             t3 = time.time()
+
+            # Tracking
+            #self.phalp_tracker.tracker.predict()
+            #self.phalp_tracker.tracker.update(detections = [detection],
+                                              #t_ = frame_count,
+                                              #frame_name = frame_name,
+                                              #self.phalp_tracker.cfg.phalp.shot)
+            
+            # Pose smoothing (post-processing)
+            # TODO
 
             # Process outputs
             depths = outputs['pred_depths'][0, :, 0]
