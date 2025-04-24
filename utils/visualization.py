@@ -248,45 +248,46 @@ def render_mesh(height, width, meshes, face, cam_intrinsics, colors = None):
     renderer.delete()
     return rgb, depth
 
-def vis_vertices_img(frame, verts_cam_list, cam_intrinsics, frame_size, point_radius=2, input_size=1288):
-    frame = frame.copy()
-    frame_w, frame_h = frame_size
-    K = cam_intrinsics.float()
+RADIUS = 1
+KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*RADIUS+1, 2*RADIUS+1))
 
-    # Combiner tous les ensembles de vertices
-    all_verts = torch.cat(
-        [torch.from_numpy(verts).float() if verts.ndim == 2 else torch.from_numpy(verts).float().squeeze(0) 
-         for verts in verts_cam_list], 
-        dim=0
-    )
+ORIG_W, ORIG_H = 1280, 720
+PADDED_H = ORIG_W
+PAD_TOP = (PADDED_H - ORIG_H) // 2
+SCALE_FACTOR = 1288 / PADDED_H  # input_size / padded_h
+EXPECTED_CY = 1288 / 2
 
-    # Projection vectorisée
-    verts_homo = all_verts @ K.T
-    verts_2d_resized = verts_homo[:, :2] / (verts_homo[:, 2:3] + 1e-6)
+def vis_vertices_img(frame, verts_cam_list, cam_intrinsics, frame_size):
+    frame_h, frame_w = frame.shape[:2]
+    # 1) concat tous les points en numpy directement
+    all_verts = np.vstack([
+        v.squeeze(0) if v.ndim == 3 else v
+        for v in verts_cam_list
+    ]).astype(np.float32)  # (N,3)
 
-    # Ajustements
-    orig_w, orig_h = 1280, 720
-    padded_h = orig_w
-    pad_top = (padded_h - orig_h) // 2
-    scale_factor = input_size / padded_h
-    expected_cy = input_size / 2
-    predicted_cy = K[1, 2]
-    cy_offset = (expected_cy - predicted_cy) * (frame_h / (input_size - 2 * pad_top * scale_factor))
-    depth_adjust = 0  # Peut être ajusté si nécessaire
+    # 2) projection homogène en numpy
+    K = cam_intrinsics.cpu().numpy().astype(np.float32)
+    verts_homo = all_verts @ K.T                # (N,3)
+    pts2d = verts_homo[:, :2] / (verts_homo[:, 2:] + 1e-6)  # (N,2)
 
-    verts_2d_adjusted = verts_2d_resized.clone()
-    verts_2d_adjusted[:, 0] = verts_2d_resized[:, 0] * (frame_w / input_size)
-    verts_2d_adjusted[:, 1] = (verts_2d_resized[:, 1] - pad_top * scale_factor) * \
-                              (frame_h / (input_size - 2 * pad_top * scale_factor)) + cy_offset + depth_adjust
+    # 3) ajustement de l’offset en y
+    predicted_cy = K[1,2]
+    cy_offset = (EXPECTED_CY - predicted_cy) * (frame_h / (1288 - 2 * PAD_TOP * SCALE_FACTOR))
 
-    # Conversion et clipping
-    verts_np = verts_2d_adjusted.cpu().numpy()
-    coords = np.clip(verts_np, [0, 0], [frame_w - 1, frame_h - 1]).astype(np.int32)
+    # 4) passage à l’échelle vers la taille de la frame
+    xs = pts2d[:,0] * (frame_w / 1288)
+    ys = (pts2d[:,1] - PAD_TOP * SCALE_FACTOR) * (frame_h / (1288 - 2 * PAD_TOP * SCALE_FACTOR))
+    ys += cy_offset
 
-    # Rendu avec masque
-    mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
-    for (x, y) in coords:
-        cv2.circle(mask, (x, y), point_radius, 255, -1)
-    
-    frame[mask == 255] = [0, 255, 0]
+    # 5) clipping et entiers
+    ix = np.clip(xs, 0, frame_w-1).astype(np.int32)
+    iy = np.clip(ys, 0, frame_h-1).astype(np.int32)
+
+    # 6) masque binaire + dilatation pour faire des “cercles”
+    mask = np.zeros((frame_h, frame_w), np.uint8)
+    mask[iy, ix] = 255
+    mask = cv2.dilate(mask, KERNEL, iterations=1)
+
+    # 7) application du rendu vert
+    frame[mask==255] = (0,255,0)
     return frame
