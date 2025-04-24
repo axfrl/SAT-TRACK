@@ -1,0 +1,55 @@
+# SAT-HMR Video Inference Configuration
+pretrain: True
+pretrain_path: './weights/sat_hmr/sat_644.pth'
+
+# Video input/output directories
+input_dir: '/home/alphafalcon/Videos/input'
+output_dir: '/home/alphafalcon/Videos/output'
+
+# Inference settings
+infer_batch_size: 1
+infer_num_workers: 4
+distributed_infer: True
+conf_thresh: 0.7
+display: False
+live_stream: True
+use_fp16: False  # Set to True for FP16
+render_mode: 'points'
+
+# Model input size
+input_size: 1288
+
+# Model encoder
+encoder: 'vitb'
+
+# Decoder settings
+hidden_dim: 768
+nheads: 4
+dec_layers: 6
+dim_feedforward: 2048
+dropout: 0.0
+num_queries: 50
+transformer_activation: "relu"
+
+# SAT configuration
+sat_cfg:
+  use_sat: True
+  share_patch_embed: False
+  preprocess_pos_embed: False
+  num_lvls: 3
+  lvl_embed: True
+  get_map_layer: 3
+  use_additional_blocks: True
+  conf_thresh: 0.3
+  scale_thresh: 0.5
+
+# Denoising configuration
+dn_cfg:
+  use_dn: True
+  dn_number: 10
+  tgt_embed_type: "params"
+  box_noise_scale: 0.4
+  tgt_noise_scale: 0.2
+
+# Mode
+mode: "infer"
