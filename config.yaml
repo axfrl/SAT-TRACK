@@ -9,7 +9,7 @@ output_dir: '/home/alphafalcon/Videos/output'
 # Inference settings
 infer_batch_size: 1
 infer_num_workers: 8
-distributed_infer: False
+distributed_infer: True
 conf_thresh: 0.6
 display: False
 live_stream: False

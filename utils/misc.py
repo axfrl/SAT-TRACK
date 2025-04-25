@@ -28,6 +28,7 @@ from torch import Tensor
 
 # needed due to empty tensor bug in pytorch and torchvision 0.5
 import torchvision
+
 if float(torchvision.__version__[:3]) < 0.5:
     import math
     #from torchvision.ops.misc import _NewEmptyTensorOp

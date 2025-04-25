@@ -2,8 +2,8 @@ import warnings
 
 from torch import nn
 
-from phalp.utils import get_pylogger
-from phalp.models.hmar.hmar import HMAR
+from utils import get_pylogger
+from models.human_models.hmar.hmar import HMAR
 
 warnings.filterwarnings('ignore')
 log = get_pylogger(__name__)

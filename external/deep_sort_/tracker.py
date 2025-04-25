@@ -96,12 +96,12 @@ class Tracker:
             if not (track.is_confirmed() or track.is_tentative()): continue
                     
                          
-            appe_features += [track.track_data['prediction']['appe'][-1]]
-            loca_features += [track.track_data['prediction']['loca'][-1]]
-            pose_features += [track.track_data['prediction']['pose'][-1]]
-            uv_maps       += [track.track_data['prediction']['uv'][-1]]
+            appe_features += [to_numpy(track.track_data['prediction']['appe'][-1])]
+            loca_features += [to_numpy(track.track_data['prediction']['loca'][-1])]
+            pose_features += [to_numpy(track.track_data['prediction']['pose'][-1])]
+            uv_maps       += [to_numpy(track.track_data['prediction']['uv'][-1])]
             targets       += [track.track_id]
-            
+                    
             
         self.metric.partial_fit(np.asarray(appe_features), np.asarray(loca_features), np.asarray(pose_features), np.asarray(uv_maps), np.asarray(targets), active_targets)
         
@@ -110,13 +110,14 @@ class Tracker:
     def _match(self, detections):
 
         def gated_metric(tracks, dets, track_indices, detection_indices):
-            appe_emb          = np.array([dets[i].detection_data['appe'] for i in detection_indices])
-            loca_emb          = np.array([dets[i].detection_data['loca'] for i in detection_indices])
-            pose_emb          = np.array([dets[i].detection_data['pose'] for i in detection_indices])
-            uv_maps           = np.array([dets[i].detection_data['uv'] for i in detection_indices])
-            targets           = np.array([tracks[i].track_id for i in track_indices])
+            appe_emb = np.array([to_numpy(dets[i].detection_data['appe']) for i in detection_indices])
+            loca_emb = np.array([to_numpy(dets[i].detection_data['loca']) for i in detection_indices])
+            pose_emb = np.array([to_numpy(dets[i].detection_data['pose']) for i in detection_indices])
+            uv_maps  = np.array([to_numpy(dets[i].detection_data['uv'])   for i in detection_indices])
+            targets  = np.array([tracks[i].track_id for i in track_indices])
             cost_matrix       = self.metric.distance([appe_emb, loca_emb, pose_emb, uv_maps], targets, dims=[self.A_dim, self.P_dim, self.L_dim], phalp_tracker=self.phalp_tracker)
 
+            print(np.shape(pose_emb))
             return cost_matrix
 
         # Split track set into confirmed and unconfirmed tracks.
@@ -183,4 +184,7 @@ class Tracker:
                 self.tracks[track_idx].add_predicted(pose=p_pred[p_id] if("P" in features) else None, 
                                                      loca=l_pred[p_id] if("L" in features) else None)
                 
-        
+def to_numpy(x):
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().numpy()
+    return x  # déjà numpy

@@ -2,12 +2,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from phalp.models.backbones import resnet
-from phalp.models.heads.apperence_head import TextureHead
-from phalp.models.heads.encoding_head import EncodingHead
-from phalp.models.heads.smpl_head import SMPLHead
-from phalp.utils.smpl_utils import SMPL
-from phalp.utils.utils import compute_uvsampler, perspective_projection
+from models.backbones import resnet
+from models.human_models.heads.apperence_head import TextureHead
+from models.human_models.heads.encoding_head import EncodingHead
+from models.human_models.heads.smpl_head import SMPLHead
+from utils.smpl_utils import SMPL
+from utils.utils import compute_uvsampler, perspective_projection
 
 
 class HMAR(nn.Module):

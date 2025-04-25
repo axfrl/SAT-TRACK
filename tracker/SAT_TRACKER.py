@@ -3,18 +3,17 @@ import torch.nn as nn
 import cv2
 import os
 import time
+import numpy as np
 from queue import Queue
 from threading import Thread, Event
 import torch.nn.functional as F 
 from engines.funcs.video_stream_funcs import get_transform, preprocess_frame, create_empty_targets, write_frames
 from utils.visualization import vis_vertices_img
-from tracker.PHALP import PHALP
 from structures.boxes import Boxes
 from structures.instances import Instances
-from structures import pairwise_iou
 from segment_anything import SamPredictor, sam_model_registry
 from pycocotools import mask as mask_utils
-from configs.base import CACHE_DIR
+from configs.base import WEIGHTS_DIR
 from external.deep_sort_ import nn_matching
 from external.deep_sort_.detection import Detection
 from external.deep_sort_.tracker import Tracker
@@ -25,13 +24,17 @@ from utils.utils import (convert_pkl, get_prediction_interval,
 from utils.utils_dataset import process_image, process_mask
 from utils.utils_download import cache_url
 from utils.postprocessor import Postprocessor
-
+from sklearn.linear_model import Ridge
+import gdown
+from smplx.lbs import batch_rodrigues  # ou bien pytorch3d.transforms.axis_angle_to_matrix
 
 class TrackModel(nn.Module):
     def __init__(self, cfg, device, sat_model):
         super(TrackModel, self).__init__()
 
         self.sat_model = sat_model
+        self.focal = sat_model.focal 
+        self.input_size= sat_model.input_size
         self.cfg = cfg
         self.device = device
         self.eval_keys       = ['tracked_ids', 'tracked_bbox', 'tid', 'bbox', 'tracked_time']
@@ -82,7 +85,39 @@ class TrackModel(nn.Module):
     def setup_postprocessor(self):
         # by default this will not be initialized
         self.postprocessor = Postprocessor(self.cfg, self)
+    
+    def get_croped_image(self, image, bbox, bbox_pad, seg_mask):
+        
+        # Encode the mask for storing, borrowed from tao dataset
+        # https://github.com/TAO-Dataset/tao/blob/master/scripts/detectors/detectron2_infer.py
+        masks_decoded = np.array(np.expand_dims(seg_mask, 2), order='F', dtype=np.uint8)
+        rles = mask_utils.encode(masks_decoded)
+        for rle in rles: 
+            rle["counts"] = rle["counts"].decode("utf-8")
+            
+        seg_mask = seg_mask.astype(int)*255
+        if(len(seg_mask.shape)==2):
+            seg_mask = np.expand_dims(seg_mask, 2)
+            seg_mask = np.repeat(seg_mask, 3, 2)
+        
+        center_      = np.array([(bbox[2] + bbox[0])/2, (bbox[3] + bbox[1])/2])
+        scale_       = np.array([(bbox[2] - bbox[0]), (bbox[3] - bbox[1])])
 
+        center_pad   = np.array([(bbox_pad[2] + bbox_pad[0])/2, (bbox_pad[3] + bbox_pad[1])/2])
+        scale_pad    = np.array([(bbox_pad[2] - bbox_pad[0]), (bbox_pad[3] - bbox_pad[1])])
+        mask_tmp     = process_mask(seg_mask.astype(np.uint8), center_pad, 1.0*np.max(scale_pad))
+        image_tmp    = process_image(image, center_pad, 1.0*np.max(scale_pad))
+
+        # bbox_        = expand_bbox_to_aspect_ratio(bbox, target_aspect_ratio=(192,256))
+        # center_x     = np.array([(bbox_[2] + bbox_[0])/2, (bbox_[3] + bbox_[1])/2])
+        # scale_x      = np.array([(bbox_[2] - bbox_[0]), (bbox_[3] - bbox_[1])])
+        # mask_tmp     = process_mask(seg_mask.astype(np.uint8), center_x, 1.0*np.max(scale_x))
+        # image_tmp    = process_image(image, center_x, 1.0*np.max(scale_x))
+        
+        masked_image = torch.cat((image_tmp, mask_tmp[:1, :, :]), 0)
+        
+        return masked_image, center_, scale_, rles, center_pad, scale_pad
+    
     def get_detections(self, image, sat_data, frame_name, t_, additional_data=None, measurements=None):
         """
         Get detections using SAT-HMR model, replacing Detectron2 mask processing.
@@ -182,6 +217,25 @@ class TrackModel(nn.Module):
             masks.append(mask[0])
         return np.array(masks)
 
+    def transl3d_to_weak_cam(self, pred_transl, eps=1e-6):
+        """
+        pred_transl : np.array shape (BS,3) = [t_x, t_y, t_z] issues de process_smpl
+        focal       : float = model.focal
+        input_size  : int   = model.input_size
+        -----------------------------------------------
+        Retour : torch.Tensor shape (BS,3) = [scale, tx, ty]
+        """
+        tx_3d = pred_transl[:, 0]
+        ty_3d = pred_transl[:, 1]
+        tz    = pred_transl[:, 2]
+
+        scale = (2.0 * self.focal) / (tz * self.input_size + eps)
+        tx = tx_3d * scale
+        ty = ty_3d * scale
+
+        cam_np = np.stack([scale, tx, ty], axis=1).astype(np.float32)
+        return torch.from_numpy(cam_np)
+
     def get_human_features(self, sat_data, image, frame_name, t_, measurments, gt=None, ann=None, extra_data=None):
         """
         Get human features using SAT-HMR outputs directly and HMAR for appearance and UV maps.
@@ -267,20 +321,34 @@ class TrackModel(nn.Module):
             with torch.no_grad():
                 extra_args = {}
                 hmar_out = self.HMAR(masked_image_list.cuda(), **extra_args)
-                uv_vector = hmar_out['uv_vector'].cpu().numpy()  # [BS, 256, 256, 3]
-                appe_embedding = self.HMAR.autoencoder_hmar(uv_vector, en=True).view(BS, -1)  # [BS, embedding_dim]
+                uv_vector = hmar_out['uv_vector']  # [BS, 256, 256, 3]
+                appe_embedding = self.HMAR.autoencoder_hmar(uv_vector, en=True)  # [BS, embedding_dim]
+                appe_embedding  = appe_embedding.view(appe_embedding.shape[0], -1)
+
         else:
             uv_vector = np.zeros((BS, 256, 256, 3))
             appe_embedding = torch.zeros(BS, 512)  # Dummy embedding
 
         # Prepare SMPL parameters and joints from SAT-HMR
-        pred_smpl_params = [
-            {
-                'global_orient': pred_poses[i, :3].cpu().numpy(),
-                'body_pose': pred_poses[i, 3:].cpu().numpy(),
-                'betas': pred_betas[i].cpu().numpy()
-            } for i in selected_ids
-        ]
+        pred_cam_tensor = pred_transl[selected_ids]  # (BS, 3) – torch.Tensor
+        pred_smpl_params = []
+        for idx in selected_ids:
+            aa        = pred_poses[idx]            # (72,)
+            global_aa = aa[:3].unsqueeze(0)        # (1,3)
+            body_aa   = aa[3:].view(-1,3)          # (23,3)
+
+            # axis-angle → rotmat
+            global_rot = batch_rodrigues(global_aa)[0].cpu().numpy()   # (3,3)
+            body_rot   = batch_rodrigues(body_aa).cpu().numpy()       # (23,3,3)
+
+            pred_smpl_params.append({
+                'global_orient': global_rot[None, ...],  # (1,3,3)
+                'body_pose'    : body_rot,               # (23,3,3)
+                'betas'        : pred_betas[idx].cpu().numpy()  # (10,)
+            })
+        
+        pred_cam_np = self.transl3d_to_weak_cam(pred_cam_tensor.cpu().numpy())  # (BS,3) array
+
         pred_joints_3d = pred_j3ds[selected_ids].cpu().numpy()  # [BS, num_joints, 3]
         pred_joints_2d = pred_j2ds[selected_ids].cpu().numpy()  # [BS, num_joints, 2]
         pred_cam = pred_transl[selected_ids].cpu().numpy()  # [BS, 3]
@@ -289,11 +357,14 @@ class TrackModel(nn.Module):
         if self.cfg.phalp.pose_distance == "joints":
             pose_embedding = torch.from_numpy(pred_joints_3d).view(BS, -1)
         elif self.cfg.phalp.pose_distance == "smpl":
-            pose_embedding = []
+            pose_embedding_list = []
             for i in range(BS):
-                pose_embedding_ = smpl_to_pose_camera_vector(pred_smpl_params[i], pred_cam[i])
-                pose_embedding.append(torch.from_numpy(pose_embedding_[0]))
-            pose_embedding = torch.stack(pose_embedding, dim=0)
+                emb_np = smpl_to_pose_camera_vector(
+                    pred_smpl_params[i],      # dict avec rotmats + betas
+                    pred_cam_np[i]            # [scale, tx, ty]
+                )
+                pose_embedding_list.append(torch.from_numpy(emb_np[0]))
+            pose_embedding = torch.stack(pose_embedding_list, dim=0)
         else:
             raise ValueError("Unknown pose distance")
         
@@ -305,7 +376,8 @@ class TrackModel(nn.Module):
 
         # Compute full embedding (for legacy)
         full_embedding = torch.cat((appe_embedding.cpu(), pose_embedding, loca_embedding), dim=1)
-
+        print(full_embedding.size())
+        print(pose_embedding.size())
         # Create detection data list
         detection_data_list = []
         for i, p_ in enumerate(selected_ids):
@@ -344,8 +416,11 @@ class TrackModel(nn.Module):
         if(attibute=="P"):
 
             vectors_pose         = vectors[0]
+            print(np.shape(vectors_pose))
             vectors_data         = vectors[1]
+            print(np.shape(vectors_data))
             vectors_time         = vectors[2]
+            print(np.shape(vectors_time))
 
             en_pose              = torch.from_numpy(vectors_pose)
             en_data              = torch.from_numpy(vectors_data)
@@ -507,51 +582,48 @@ class TrackModel(nn.Module):
             return list_of_shots
 
     def cached_download_from_drive(self, additional_urls=None):
-        """Download a file from Google Drive if it doesn't exist yet.
-        :param url: the URL of the file to download
-        :param path: the path to save the file to
         """
+        Check for existing model files in WEIGHTS_DIR and download only missing files.
+        """
+        WEIGHTS_DIR = "/home/alphafalcon/tracker/code/SAT-TRACK/weights"
 
-        os.makedirs(os.path.join(CACHE_DIR, "phalp"), exist_ok=True)
-        os.makedirs(os.path.join(CACHE_DIR, "phalp/3D"), exist_ok=True)
-        os.makedirs(os.path.join(CACHE_DIR, "phalp/weights"), exist_ok=True)
-        os.makedirs(os.path.join(CACHE_DIR, "phalp/ava"), exist_ok=True)
+        # Créer les sous-répertoires nécessaires
+        os.makedirs(os.path.join(WEIGHTS_DIR, "smpl_data/smpl"), exist_ok=True)
+        os.makedirs(os.path.join(WEIGHTS_DIR, "phalp/3D"), exist_ok=True)
+        os.makedirs(os.path.join(WEIGHTS_DIR, "phalp/weights"), exist_ok=True)
+        os.makedirs(os.path.join(WEIGHTS_DIR, "phalp/ava"), exist_ok=True)
 
-        smpl_path = os.path.join(CACHE_DIR, "phalp/3D/models/smpl/SMPL_NEUTRAL.pkl")
-
-        if not os.path.exists(smpl_path):
-            # We are downloading the SMPL model here for convenience. Please accept the license
-            # agreement on the SMPL website: https://smpl.is.tue.mpg.
-            os.makedirs(os.path.join(CACHE_DIR, "phalp/3D/models/smpl"), exist_ok=True)
-            os.system('wget https://github.com/classner/up/raw/master/models/3D/basicModel_neutral_lbs_10_207_0_v1.0.0.pkl')
-
-            convert_pkl('basicModel_neutral_lbs_10_207_0_v1.0.0.pkl')
-            os.system('rm basicModel_neutral_lbs_10_207_0_v1.0.0.pkl')
-            os.system('mv basicModel_neutral_lbs_10_207_0_v1.0.0_p3.pkl ' + smpl_path)
-
-        additional_urls = additional_urls if additional_urls is not None else {}
+        # Liste des fichiers à vérifier/télécharger
         download_files = {
-            "head_faces.npy"           : ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/3D/head_faces.npy", os.path.join(CACHE_DIR, "phalp/3D")],
-            "mean_std.npy"             : ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/3D/mean_std.npy", os.path.join(CACHE_DIR, "phalp/3D")],
-            "smpl_mean_params.npz"     : ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/3D/smpl_mean_params.npz", os.path.join(CACHE_DIR, "phalp/3D")],
-            "SMPL_to_J19.pkl"          : ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/3D/SMPL_to_J19.pkl", os.path.join(CACHE_DIR, "phalp/3D")],
-            "texture.npz"              : ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/3D/texture.npz", os.path.join(CACHE_DIR, "phalp/3D")],
-            "bmap_256.npy"              : ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/bmap_256.npy", os.path.join(CACHE_DIR, "phalp/3D")],
-            "fmap_256.npy"              : ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/fmap_256.npy", os.path.join(CACHE_DIR, "phalp/3D")],
+            "SMPL_NEUTRAL.pkl": ["", os.path.join(WEIGHTS_DIR, "smpl_data/smpl")],  # Pas d'URL, fichier existant
+            "smpl_mean_params.npz": ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/3D/smpl_mean_params.npz", os.path.join(WEIGHTS_DIR, "smpl_data/smpl")],
+            "SMPL_to_J19.pkl": ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/3D/SMPL_to_J19.pkl", os.path.join(WEIGHTS_DIR, "smpl_data/smpl")],
+            "texture.npz": ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/3D/texture.npz", os.path.join(WEIGHTS_DIR, "smpl_data/smpl")],
+            "head_faces.npy": ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/3D/head_faces.npy", os.path.join(WEIGHTS_DIR, "smpl_data/smpl")],
+            "mean_std.npy": ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/3D/mean_std.npy", os.path.join(WEIGHTS_DIR, "smpl_data/smpl")],
+            "bmap_256.npy": ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/bmap_256.npy", os.path.join(WEIGHTS_DIR, "phalp/3D")],
+            "fmap_256.npy": ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/fmap_256.npy", os.path.join(WEIGHTS_DIR, "phalp/3D")],
+            "hmar_v2_weights.pth": ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/weights/hmar_v2_weights.pth", os.path.join(WEIGHTS_DIR, "phalp/weights")],
+            "pose_predictor.pth": ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/weights/pose_predictor_40006.ckpt", os.path.join(WEIGHTS_DIR, "phalp/weights")],
+            "pose_predictor.yaml": ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/weights/config_40006.yaml", os.path.join(WEIGHTS_DIR, "phalp/weights")],
+            "ava_labels.pkl": ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/ava/ava_labels.pkl", os.path.join(WEIGHTS_DIR, "phalp/ava")],
+            "ava_class_mapping.pkl": ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/ava/ava_class_mappping.pkl", os.path.join(WEIGHTS_DIR, "phalp/ava")],
+        }
 
-            "hmar_v2_weights.pth"      : ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/weights/hmar_v2_weights.pth", os.path.join(CACHE_DIR, "phalp/weights")],
-            "pose_predictor.pth"       : ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/weights/pose_predictor_40006.ckpt", os.path.join(CACHE_DIR, "phalp/weights")],
-            "pose_predictor.yaml"      : ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/weights/config_40006.yaml", os.path.join(CACHE_DIR, "phalp/weights")],
-            
-            # data for ava dataset
-            "ava_labels.pkl"           : ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/ava/ava_labels.pkl", os.path.join(CACHE_DIR, "phalp/ava")],
-            "ava_class_mapping.pkl"   : ["https://people.eecs.berkeley.edu/~jathushan/projects/phalp/ava/ava_class_mappping.pkl", os.path.join(CACHE_DIR, "phalp/ava")],
+        # Ajouter des URLs supplémentaires si fournies
+        additional_urls = additional_urls if additional_urls is not None else {}
+        download_files.update(additional_urls)
 
-        } | additional_urls # type: ignore
-
-        for file_name, url in download_files.items():
-            if not os.path.exists(os.path.join(url[1], file_name)):
-                print("Downloading file: " + file_name)
-                # output = gdown.cached_download(url[0], os.path.join(url[1], file_name), fuzzy=True)
-                output = cache_url(url[0], os.path.join(url[1], file_name))
-                assert os.path.exists(os.path.join(url[1], file_name)), f"{output} does not exist"
+        # Vérifier et télécharger les fichiers manquants
+        for file_name, url_info in download_files.items():
+            file_path = os.path.join(url_info[1], file_name)
+            if os.path.exists(file_path):
+                print(f"Using existing {file_name} at {file_path}")
+            elif url_info[0]:  # Télécharger seulement si une URL est fournie
+                print(f"Downloading {file_name} to {file_path}")
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                gdown.download(url_info[0], file_path, quiet=False)
+                if not os.path.exists(file_path):
+                    raise FileNotFoundError(f"Failed to download {file_name} to {file_path}")
+            else:
+                raise FileNotFoundError(f"{file_name} not found in {file_path} and no download URL provided")

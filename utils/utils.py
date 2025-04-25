@@ -15,7 +15,7 @@ import torch
 from rich.progress import (BarColumn, Progress, SpinnerColumn,
                            TaskProgressColumn, TextColumn, TimeElapsedColumn,
                            TimeRemainingColumn, TransferSpeedColumn)
-from phalp.utils.colors import phalp_colors, slahmr_colors
+from utils.colors_track import phalp_colors, slahmr_colors
 
 
 def get_progress_bar(sequence, total=None, description=None, disable=False):

@@ -7,28 +7,21 @@ from threading import Thread, Event
 import torch.nn.functional as F 
 from .funcs.video_stream_funcs import get_transform, preprocess_frame, create_empty_targets, write_frames
 from utils.visualization import vis_vertices_img
-#from tracker.PHALP import PHALP
-#from structures.boxes import Boxes
-#from structures.instances import Instances
-#from structures import pairwise_iou
-#from segment_anything import SamPredictor, sam_model_registry
-#from pycocotools import mask as mask_utils
-#from external.deep_sort_.detection import Detection
-#from tracker.SAT_TRACKER import TrackModel
+from tracker.SAT_TRACKER import TrackModel
 
 class Engine:
     def __init__(self, args, mode='infer', gpu_id=0):
         self.mode = mode
-        self.conf_thresh = args.conf_thresh
-        self.output_dir = args.output_dir
-        self.live_stream = args.live_stream
-        self.use_fp16 = args.use_fp16
-        self.render_mode = args.render_mode  # 'points' or 'mesh'
+        self.conf_thresh = args.sathmr.conf_thresh
+        self.output_dir = args.video.output_dir
+        self.live_stream = args.sathmr.live_stream
+        self.use_fp16 = args.sathmr.use_fp16
+        self.render_mode = args.sathmr.render_mode  # 'points' or 'mesh'
         self.gpu_id = gpu_id
         self.device = self.set_device(gpu_id)
         os.makedirs(self.output_dir, exist_ok=True)
-        self.prepare_models(args)
-        #self.phalp_tracker = TrackModel(args, self.device, self.model)
+        self.prepare_models(args.sathmr)
+        self.phalp_tracker = TrackModel(args, self.device, self.model)
     
     def set_device(self, gpu_id=0):
         """Set device for a specific GPU or CPU."""
@@ -135,20 +128,32 @@ class Engine:
             t3 = time.time()
 
             # Tracking
-            #self.phalp_tracker.tracker.predict()
-            #self.phalp_tracker.tracker.update(detections = [detection],
-                                              #t_ = frame_count,
-                                              #frame_name = frame_name,
-                                              #self.phalp_tracker.cfg.phalp.shot)
+                # Get features
+            pad_h = input_size - frame_height
+            pad_w = input_size - frame_width
+            top = pad_h // 2
+            left = pad_w // 2
+            measurements = (frame_height, frame_width, input_size, left, top)
+            
+            detections = self.phalp_tracker.get_human_features(sat_data=outputs, 
+                                                 image=frame, 
+                                                 frame_name=frame_name, 
+                                                 t_=frame_count, 
+                                                 measurments=measurements)
+            # sat_data, image, frame_name, t_, measurments
+                # Forward tracking
+            self.phalp_tracker.tracker.predict()
+            self.phalp_tracker.tracker.update(detections, frame_count, frame_name, self.phalp_tracker.cfg.phalp.shot)
             
             # Pose smoothing (post-processing)
             # TODO
+
             t4 = time.time()
 
             # Process outputs
             confs = outputs['pred_confs'][0].view(-1)
             valid_mask = confs > conf_thresh
-
+            
             if valid_mask.any():
                 valid_verts_list = [outputs['pred_verts'][0, i].detach().cpu().numpy() for i in range(len(confs)) if valid_mask[i]]
                 cam_intrinsics = outputs['pred_intrinsics'][0].reshape(3, 3).detach().cpu()

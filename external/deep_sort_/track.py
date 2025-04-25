@@ -8,6 +8,7 @@ from collections import deque
 import numpy as np
 import scipy.signal as signal
 from scipy.ndimage.filters import gaussian_filter1d
+import torch
 
 
 class TrackState:
@@ -80,25 +81,39 @@ class Track:
             for tx in range(self.cfg.phalp.track_history):
                 self.track_data["history"][-1-tx]['loca'] = copy.deepcopy(detection.detection_data['loca'])
 
-        if("T" in self.cfg.phalp.predict):
-            mixing_alpha_                      = self.cfg.phalp.alpha*(detection.detection_data['conf']**2)
-            ones_old                           = self.track_data['prediction']['uv'][-1][3:, :, :]==1
-            ones_new                           = self.track_data['history'][-1]['uv'][3:, :, :]==1
-            ones_old                           = np.repeat(ones_old, 3, 0)
-            ones_new                           = np.repeat(ones_new, 3, 0)
-            ones_intersect                     = np.logical_and(ones_old, ones_new)
-            ones_union                         = np.logical_or(ones_old, ones_new)
-            good_old_ones                      = np.logical_and(np.logical_not(ones_intersect), ones_old)
-            good_new_ones                      = np.logical_and(np.logical_not(ones_intersect), ones_new)
-            new_rgb_map                        = np.zeros((3, 256, 256))
-            new_mask_map                       = np.zeros((1, 256, 256))-1
+        if "T" in self.cfg.phalp.predict:
+            mixing_alpha_ = self.cfg.phalp.alpha * (detection.detection_data['conf'] ** 2)
+
+            uv_pred = to_numpy(self.track_data['prediction']['uv'][-1])
+            uv_hist = to_numpy(self.track_data['history'][-1]['uv'])
+
+            ones_old = uv_pred[3:, :, :] == 1
+            ones_new = uv_hist[3:, :, :] == 1
+
+            ones_old = np.repeat(ones_old, 3, axis=0)
+            ones_new = np.repeat(ones_new, 3, axis=0)
+
+            ones_intersect = np.logical_and(ones_old, ones_new)
+            ones_union     = np.logical_or(ones_old, ones_new)
+            good_old_ones  = np.logical_and(~ones_intersect, ones_old)
+            good_new_ones  = np.logical_and(~ones_intersect, ones_new)
+
+            new_rgb_map  = np.zeros((3, 256, 256))
+            new_mask_map = np.full((1, 256, 256), -1.0)
+
             new_mask_map[ones_union[:1, :, :]] = 1.0
-            new_rgb_map[ones_intersect]        = (1-mixing_alpha_)*self.track_data['prediction']['uv'][-1][:3, :, :][ones_intersect] + mixing_alpha_*self.track_data['history'][-1]['uv'][:3, :, :][ones_intersect]
-            new_rgb_map[good_old_ones]         = self.track_data['prediction']['uv'][-1][:3, :, :][good_old_ones] 
-            new_rgb_map[good_new_ones]         = self.track_data['history'][-1]['uv'][:3, :, :][good_new_ones] 
-            self.track_data['prediction']['uv'].append(np.concatenate((new_rgb_map , new_mask_map), 0))
+
+            new_rgb_map[ones_intersect] = (
+                (1 - mixing_alpha_) * uv_pred[:3, :, :][ones_intersect] +
+                mixing_alpha_ * uv_hist[:3, :, :][ones_intersect]
+            )
+            new_rgb_map[good_old_ones] = uv_pred[:3, :, :][good_old_ones]
+            new_rgb_map[good_new_ones] = uv_hist[:3, :, :][good_new_ones]
+
+            self.track_data['prediction']['uv'].append(np.concatenate((new_rgb_map, new_mask_map), axis=0))
         else:
-            self.track_data['prediction']['uv'].append(self.track_data['history'][-1]['uv'])
+            self.track_data['prediction']['uv'].append(to_numpy(self.track_data['history'][-1]['uv']))
+
             
         
         self.hits += 1
@@ -138,3 +153,8 @@ class Track:
         smoothed    = np.array([signal.medfilt(param, kernel_size) for param in bbox.T]).T
         out         = np.array([gaussian_filter1d(traj, sigma) for traj in smoothed.T]).T
         return list(out)
+    
+def to_numpy(x):
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().numpy()
+    return x

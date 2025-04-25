@@ -5,12 +5,13 @@ from typing import Dict, Optional
 import hydra
 from omegaconf import MISSING
 
-CACHE_DIR = os.path.join(os.environ.get("HOME"), ".cache")  # None if the variable does not exist
+WEIGHTS_DIR = "/home/alphafalcon/tracker/code/SAT-TRACK/weights"
+print("weights_dir", WEIGHTS_DIR)
 
 @dataclass
 class VideoConfig:
-    source: str = MISSING  # Must be provided via CLI or YAML
-    output_dir: str = 'outputs/'
+    source: str = '/home/alphafalcon/tracker/code/SAT-TRACK/input'
+    output_dir: str = '/home/alphafalcon/tracker/code/SAT-TRACK/output'
     extract_video: bool = True
     base_path: Optional[str] = None
     start_frame: int = -1
@@ -41,18 +42,18 @@ class PHALPConfig:
 
 @dataclass
 class PosePredictorConfig:
-    config_path: str = f"{CACHE_DIR}/phalp/weights/pose_predictor.yaml"
-    weights_path: str = f"{CACHE_DIR}/phalp/weights/pose_predictor.pth"
-    mean_std: str = f"{CACHE_DIR}/phalp/3D/mean_std.npy"
+    config_path: str = f"{WEIGHTS_DIR}/phalp/weights/pose_predictor.yaml"
+    weights_path: str = f"{WEIGHTS_DIR}/phalp/weights/pose_predictor.pth"
+    mean_std: str = f"{WEIGHTS_DIR}/smpl_data/smpl/mean_std.npy"
 
 @dataclass
 class AVAConfig:
-    ava_labels_path: str = f"{CACHE_DIR}/phalp/ava/ava_labels.pkl"
-    ava_class_mappping_path: str = f"{CACHE_DIR}/phalp/ava/ava_class_mapping.pkl"
+    ava_labels_path: str = f"{WEIGHTS_DIR}/phalp/ava/ava_labels.pkl"
+    ava_class_mappping_path: str = f"{WEIGHTS_DIR}/phalp/ava/ava_class_mapping.pkl"
 
 @dataclass
 class HMRConfig:
-    hmar_path: str = f"{CACHE_DIR}/phalp/weights/hmar_v2_weights.pth"
+    hmar_path: str = f"{WEIGHTS_DIR}/phalp/weights/hmar_v2_weights.pth"
 
 @dataclass
 class RenderConfig:
@@ -65,7 +66,7 @@ class RenderConfig:
     roughnessfactor: float = 0.7
     colors: str = "phalp"
     head_mask: bool = False
-    head_mask_path: str = f"{CACHE_DIR}/phalp/3D/head_faces.npy"
+    head_mask_path: str = f"{WEIGHTS_DIR}/smpl_data/smpl/head_faces.npy"
     output_resolution: int = 1440
     fps: int = 30
     blur_faces: bool = False
@@ -79,18 +80,18 @@ class PostProcessConfig:
 
 @dataclass
 class SMPLConfig:
-    MODEL_PATH: str = f"{CACHE_DIR}/phalp/3D/models/smpl/"
+    MODEL_PATH: str = f"{WEIGHTS_DIR}/smpl_data/smpl/"
     GENDER: str = 'neutral'
     MODEL_TYPE: str = 'smpl'
     NUM_BODY_JOINTS: int = 23
-    JOINT_REGRESSOR_EXTRA: str = f"{CACHE_DIR}/phalp/3D/SMPL_to_J19.pkl"
-    TEXTURE: str = f"{CACHE_DIR}/phalp/3D/texture.npz"
+    JOINT_REGRESSOR_EXTRA: str = f"{WEIGHTS_DIR}/smpl_data/smpl/SMPL_to_J19.pkl"
+    TEXTURE: str = f"{WEIGHTS_DIR}/smpl_data/smpl/texture.npz"
 
 @dataclass
 class SMPLHeadConfig:
     TYPE: str = 'basic'
     POOL: str = 'max'
-    SMPL_MEAN_PARAMS: str = f"{CACHE_DIR}/phalp/3D/smpl_mean_params.npz"
+    SMPL_MEAN_PARAMS: str = f"{WEIGHTS_DIR}/smpl_data/smpl/smpl_mean_params.npz"
     IN_CHANNELS: int = 2048
 
 @dataclass
@@ -120,11 +121,11 @@ class ExtraConfig:
 @dataclass
 class SATHMRConfig:
     pretrain: bool = True
-    pretrain_path: str = './weights/sat_hmr/sat_644.pth'
+    pretrain_path: str = f"{WEIGHTS_DIR}/sat_hmr/sat_644.pth"
     infer_batch_size: int = 1
     infer_num_workers: int = 4
     distributed_infer: bool = True
-    conf_thresh: float = 0.7
+    conf_thresh: float = 0.5
     display: bool = False
     live_stream: bool = True
     use_fp16: bool = False
@@ -157,7 +158,7 @@ class SATHMRConfig:
         'tgt_noise_scale': 0.2
     })
     mode: str = "infer"
-    gpu_id: int = 0  # Default GPU ID
+    gpu_id: int = 0
 
 @dataclass
 class FullConfig:

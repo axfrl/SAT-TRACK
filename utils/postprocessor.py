@@ -8,10 +8,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from phalp.utils.utils import progress_bar
-from phalp.utils.utils_tracks import create_fast_tracklets, get_tracks
-from phalp.utils.utils import pose_camera_vector_to_smpl
-from phalp.utils.lart_utils import to_ava_labels
+from utils.utils import progress_bar
+from utils.utils_tracks import create_fast_tracklets, get_tracks
+from utils.utils import pose_camera_vector_to_smpl
+from utils.lart_utils import to_ava_labels
 
 
 class Postprocessor(nn.Module):

@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from phalp.models.heads.smpl_head import SMPLHead
+from models.human_models.heads.smpl_head import SMPLHead
 from omegaconf import OmegaConf
 from torch import nn
 
