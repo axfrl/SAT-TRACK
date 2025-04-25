@@ -291,3 +291,58 @@ def vis_vertices_img(frame, verts_cam_list, cam_intrinsics, frame_size):
     # 7) application du rendu vert
     frame[mask==255] = (0,255,0)
     return frame
+
+def vis_vertices_img_with_tracked_pose(frame, tracked_poses, cam_intrins, frame_size, colors, input_size=1288, point_radius=8):
+    """
+    Projette et affiche plusieurs ensembles de joints 3D sur une image avec des couleurs spécifiques par ID.
+
+    Args:
+        frame: Image d'entrée (numpy array, HxWx3)
+        tracked_poses: Dictionnaire {ID: joints 3D (numpy array, Nx3)}
+        cam_intrins: Intrinsèques de la caméra pour l'image redimensionnée (torch tensor, 3x3)
+        frame_size: Dimensions de l'image originale (tuple, (largeur, hauteur))
+        colors: Dictionnaire {ID: couleur RGB (tuple, ex. (255, 0, 0))}
+        input_size: Résolution d'entrée du modèle (int, ex. 1288)
+        point_radius: Rayon des points dessinés (int)
+    
+    Returns:
+        frame: Image avec les joints rendus (numpy array)
+    """
+    frame = frame.copy()
+    frame_w, frame_h = frame_size
+    K = cam_intrins.float()
+    device = K.device
+
+    padded_h = frame_w
+    pad_top = (padded_h - frame_h) // 2 if padded_h > frame_h else 0
+    scale_factor = input_size / padded_h if padded_h > 0 else 1.0
+    expected_cy = input_size / 2
+    predicted_cy = K[1, 2]
+    cy_offset = (expected_cy - predicted_cy) * (frame_h / (input_size - 2 * pad_top * scale_factor + 1e-6))
+
+    for id, joints_3d in tracked_poses.items():
+        if not isinstance(joints_3d, np.ndarray) or joints_3d.shape[-1] != 3:
+            print(f"Joints ID {id} rejetés : Type={type(joints_3d)}, Shape={getattr(joints_3d, 'shape', 'N/A')}")
+            continue
+        
+        joints = torch.from_numpy(joints_3d).float().to(device)
+        if joints.dim() == 3:
+            joints = joints.squeeze(0)
+
+        joints_homo = joints @ K.T
+        joints_2d_resized = joints_homo[:, :2] / (joints_homo[:, 2:3] + 1e-6)
+
+        joints_2d_adjusted = joints_2d_resized.clone()
+        joints_2d_adjusted[:, 0] = joints_2d_resized[:, 0] * (frame_w / input_size)
+        joints_2d_adjusted[:, 1] = (joints_2d_resized[:, 1] - pad_top * scale_factor) * \
+                                  (frame_h / (input_size - 2 * pad_top * scale_factor + 1e-6)) + cy_offset
+
+        coords = joints_2d_adjusted.cpu().numpy()
+        coords = np.clip(coords, [0, 0], [frame_w - 1, frame_h - 1]).astype(np.int32)
+
+        color = colors.get(id, (255, 255, 255))
+
+        for (x, y) in coords:
+            cv2.circle(frame, (x, y), point_radius, color, -1)
+
+    return frame

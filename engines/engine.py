@@ -6,7 +6,7 @@ from queue import Queue
 from threading import Thread, Event
 import torch.nn.functional as F 
 from .funcs.video_stream_funcs import get_transform, preprocess_frame, create_empty_targets, write_frames
-from utils.visualization import vis_vertices_img
+from utils.visualization import vis_vertices_img, vis_vertices_img_with_tracked_pose
 from tracker.SAT_TRACKER import TrackModel
 
 class Engine:
@@ -140,14 +140,23 @@ class Engine:
                                                  frame_name=frame_name, 
                                                  t_=frame_count, 
                                                  measurments=measurements)
-            # sat_data, image, frame_name, t_, measurments
+            
+            cam_intrinsics = outputs['pred_intrinsics'][0].reshape(3, 3).detach().cpu()
+            
                 # Forward tracking
             self.phalp_tracker.tracker.predict()
             self.phalp_tracker.tracker.update(detections, frame_count, frame_name, self.phalp_tracker.cfg.phalp.shot)
             
+            tracked_pose = {}
+
+            for tracks_ in self.phalp_tracker.tracker.tracks:
+                track_id        = tracks_.track_id
+                track_data_hist = tracks_.track_data['history'][-1]
+                tracked_pose[track_id] = track_data_hist['3d_joints']
+            
+            frame_with_poses = vis_vertices_img_with_tracked_pose(frame, tracked_pose, cam_intrinsics, (frame_width, frame_height), self.phalp_tracker.color_dict)
             # Pose smoothing (post-processing)
             # TODO
-
             t4 = time.time()
 
             # Process outputs
@@ -156,8 +165,7 @@ class Engine:
             
             if valid_mask.any():
                 valid_verts_list = [outputs['pred_verts'][0, i].detach().cpu().numpy() for i in range(len(confs)) if valid_mask[i]]
-                cam_intrinsics = outputs['pred_intrinsics'][0].reshape(3, 3).detach().cpu()
-                rendered_img = vis_vertices_img(frame, valid_verts_list, cam_intrinsics, (frame_width, frame_height))
+                rendered_img = vis_vertices_img(frame_with_poses, valid_verts_list, cam_intrinsics, (frame_width, frame_height))
             else:
                 rendered_img = frame
 

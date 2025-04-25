@@ -26,7 +26,7 @@ class PHALPConfig:
     pose_distance: str = 'smpl'
     distance_type: str = 'EQ_019'
     alpha: float = 0.1
-    low_th_c: float = 0.8
+    low_th_c: float = 0.5
     hungarian_th: float = 100.0
     track_history: int = 7
     max_age_track: int = 50

@@ -26,7 +26,7 @@ phalp:
   pose_distance: smpl
   distance_type: EQ_019
   alpha: 0.1
-  low_th_c: 0.8
+  low_th_c: 0.5
   hungarian_th: 100.0
   track_history: 7
   max_age_track: 50

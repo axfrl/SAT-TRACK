@@ -49,6 +49,59 @@ class TrackModel(nn.Module):
         self.tracked_frames = []
         self.final_visuals_dic = {}
 
+        self.color_dict = {
+            1: (0, 255, 255),    # Cyan électrique
+            2: (255, 0, 255),    # Magenta électrique
+            3: (0, 255, 0),      # Vert néon
+            4: (255, 255, 0),    # Jaune vif
+            5: (255, 165, 0),    # Orange fluo
+            6: (0, 0, 255),      # Bleu électrique
+            7: (255, 20, 147),   # Rose électrique
+            8: (0, 191, 255),    # Bleu clair fluo
+            9: (138, 43, 226),   # Violet vibrant
+            10: (255, 105, 180), # Rose fluo
+            11: (255, 0, 0),     # Rouge pur
+            12: (0, 255, 128),   # Vert cyan
+            13: (255, 128, 0),   # Orange vif
+            14: (128, 0, 255),   # Violet électrique
+            15: (255, 255, 128), # Jaune pâle fluo
+            16: (0, 128, 255),   # Bleu ciel vibrant
+            17: (255, 0, 128),   # Rose magenta
+            18: (128, 255, 0),   # Vert citron
+            19: (255, 64, 64),   # Rouge corail
+            20: (0, 255, 64),    # Vert fluo clair
+            21: (64, 0, 255),    # Bleu violet
+            22: (255, 192, 0),   # Jaune doré
+            23: (192, 0, 255),   # Violet magenta
+            24: (0, 255, 192),   # Cyan clair
+            25: (255, 0, 64),    # Rouge vif
+            26: (64, 255, 0),    # Vert pomme
+            27: (0, 64, 255),    # Bleu néon
+            28: (255, 128, 128), # Rose pâle fluo
+            29: (128, 255, 128), # Vert menthe
+            30: (128, 128, 255), # Bleu lavande
+            31: (255, 64, 0),    # Orange rougeâtre
+            32: (0, 255, 255),   # Cyan pur
+            33: (255, 0, 192),   # Magenta vif
+            34: (64, 255, 64),   # Vert clair
+            35: (192, 0, 192),   # Violet rose
+            36: (0, 192, 255),   # Bleu turquoise
+            37: (255, 96, 96),   # Rouge saumon
+            38: (96, 255, 0),    # Vert chartreuse
+            39: (0, 96, 255),    # Bleu azure
+            40: (255, 255, 64),  # Jaune citron
+            41: (255, 0, 96),    # Rose vif
+            42: (96, 0, 255),    # Violet bleu
+            43: (0, 255, 96),    # Vert turquoise
+            44: (255, 160, 122), # Corail fluo
+            45: (160, 32, 240),  # Violet orchidée
+            46: (255, 215, 0),   # Or vif
+            47: (0, 255, 160),   # Cyan vert
+            48: (255, 48, 48),   # Rouge néon
+            49: (48, 255, 48),   # Vert émeraude
+            50: (48, 48, 255)    # Bleu saphir
+        }
+
         # download wights and configs from Google Drive
         self.cached_download_from_drive()
 
