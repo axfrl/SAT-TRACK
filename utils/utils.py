@@ -112,6 +112,7 @@ def pose_camera_vector_to_smpl(pose_camera_vector):
     return {'global_orient': global_orient, 'body_pose': body_pose, 'betas': betas}, camera[0]
 
 def smpl_to_pose_camera_vector(smpl_params, camera):
+    print(smpl_params)
     # convert smpl parameters to camera to pose_camera_vector for smoothness.
     global_orient_  = smpl_params['global_orient'].reshape(1, -1) # 1x3x3 -> 9
     body_pose_      = smpl_params['body_pose'].reshape(1, -1) # 23x3x3 -> 207

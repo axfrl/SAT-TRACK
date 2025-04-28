@@ -6,8 +6,13 @@ from queue import Queue
 from threading import Thread, Event
 import torch.nn.functional as F 
 from .funcs.video_stream_funcs import get_transform, preprocess_frame, create_empty_targets, write_frames
-from utils.visualization import vis_vertices_img, vis_vertices_img_with_tracked_pose
+from utils.visualization import vis_vertices_img, vis_vertices_img_with_tracked_pose, display_persistence_diagrams, update_cross_distance_matrix_plot
 from tracker.SAT_TRACKER import TrackModel
+import numpy as np
+import matplotlib.pyplot as plt
+from gtda.homology import VietorisRipsPersistence
+from matplotlib import cm
+from topology.persistence_analysis import compute_persistence_diagrams
 
 class Engine:
     def __init__(self, args, mode='infer', gpu_id=0):
@@ -100,6 +105,11 @@ class Engine:
         orig_w, orig_h = frame_width, frame_height
         transform = get_transform(input_size=input_size, orig_h=orig_h, orig_w=orig_w, device=device)
         
+        # Initialiser le mode interactif de matplotlib
+        fig_diag, ax_diag = None, None
+        #fig_matrix, ax_matrix = plt.subplots(figsize=(8, 6))
+        plt.ion()
+
         while True:
             if self.live_stream:
                 frame = frame_queue.get()
@@ -147,17 +157,40 @@ class Engine:
             self.phalp_tracker.tracker.predict()
             self.phalp_tracker.tracker.update(detections, frame_count, frame_name, self.phalp_tracker.cfg.phalp.shot)
             
+            # Pose smoothing (post-processing)
+            # TODO
+
             tracked_pose = {}
 
             for tracks_ in self.phalp_tracker.tracker.tracks:
+
+                if(not(tracks_.is_confirmed())): continue
+                if tracks_.time_since_update != 0: continue
+
                 track_id        = tracks_.track_id
                 track_data_hist = tracks_.track_data['history'][-1]
                 tracked_pose[track_id] = track_data_hist['3d_joints']
+                track_data_pred = tracks_.track_data['prediction'][-1]
             
-            frame_with_poses = vis_vertices_img_with_tracked_pose(frame, tracked_pose, cam_intrinsics, (frame_width, frame_height), self.phalp_tracker.color_dict)
-            # Pose smoothing (post-processing)
-            # TODO
+            
             t4 = time.time()
+
+            frame_with_poses = vis_vertices_img_with_tracked_pose(frame, tracked_pose, cam_intrinsics, (frame_width, frame_height), self.phalp_tracker.color_dict)
+            
+            
+            # Compute persistence diagrams using tracked_pose
+
+            
+            diagrams, diagrams_id = compute_persistence_diagrams(tracked_pose)
+
+            if len(diagrams)>0:  # Check if diagrams is non-empty
+                fig_diag, ax_diag = display_persistence_diagrams(diagrams, self.phalp_tracker.color_dict, diagrams_id, fig_diag, ax_diag)
+            else:
+                if fig_diag is not None:
+                    ax_diag.clear()
+                    ax_diag.set_title(f'Diagrammes de Persistance(Aucun humain)')
+                    fig_diag.canvas.draw()
+                    fig_diag.canvas.flush_events()
 
             # Process outputs
             confs = outputs['pred_confs'][0].view(-1)
@@ -166,6 +199,8 @@ class Engine:
             if valid_mask.any():
                 valid_verts_list = [outputs['pred_verts'][0, i].detach().cpu().numpy() for i in range(len(confs)) if valid_mask[i]]
                 rendered_img = vis_vertices_img(frame_with_poses, valid_verts_list, cam_intrinsics, (frame_width, frame_height))
+
+                
             else:
                 rendered_img = frame
 
@@ -194,6 +229,7 @@ class Engine:
         # Cleanup
         stop_event.set()
         cap.release()
+        plt.close(fig)
         if not self.live_stream:
             writer_thread.join()
         cv2.destroyAllWindows()

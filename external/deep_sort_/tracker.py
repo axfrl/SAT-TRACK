@@ -117,7 +117,6 @@ class Tracker:
             targets  = np.array([tracks[i].track_id for i in track_indices])
             cost_matrix       = self.metric.distance([appe_emb, loca_emb, pose_emb, uv_maps], targets, dims=[self.A_dim, self.P_dim, self.L_dim], phalp_tracker=self.phalp_tracker)
 
-            print(np.shape(pose_emb))
             return cost_matrix
 
         # Split track set into confirmed and unconfirmed tracks.

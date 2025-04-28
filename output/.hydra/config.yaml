@@ -22,11 +22,11 @@ video:
   start_time: 0s
   end_time: 10s
 phalp:
-  predict: TPL
+  predict: APL
   pose_distance: smpl
   distance_type: EQ_019
   alpha: 0.1
-  low_th_c: 0.5
+  low_th_c: 0.4
   hungarian_th: 100.0
   track_history: 7
   max_age_track: 50
@@ -96,9 +96,9 @@ sathmr:
   pretrain: true
   pretrain_path: /home/alphafalcon/tracker/code/SAT-TRACK/weights/sat_hmr/sat_644.pth
   infer_batch_size: 1
-  infer_num_workers: 4
+  infer_num_workers: 8
   distributed_infer: true
-  conf_thresh: 0.5
+  conf_thresh: 0.4
   display: false
   live_stream: true
   use_fp16: false

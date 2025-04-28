@@ -3,6 +3,7 @@ import io
 import torch
 import numpy as np
 from termcolor import colored
+import time
 try:
     # os.environ["PYOPENGL_PLATFORM"] = "osmesa"
     os.environ["PYOPENGL_PLATFORM"] = "egl"
@@ -13,6 +14,7 @@ import matplotlib
 from matplotlib import colormaps
 from matplotlib.colors import LightSource
 import matplotlib.pyplot as plt
+from matplotlib import cm
 import math
 import cv2
 import trimesh
@@ -20,6 +22,7 @@ from sklearn.decomposition import PCA
 from scipy.spatial.transform import Rotation as R
 import torchvision
 from .transforms import adjust_colors
+from gtda.homology import VietorisRipsPersistence
 
 BASE_COLORS = np.loadtxt(os.path.abspath(os.path.join(__file__, "../colors.txt")), skiprows=0)/255.
 BASE_COLORS = adjust_colors(BASE_COLORS,
@@ -248,8 +251,11 @@ def render_mesh(height, width, meshes, face, cam_intrinsics, colors = None):
     renderer.delete()
     return rgb, depth
 
-RADIUS = 1
-KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*RADIUS+1, 2*RADIUS+1))
+RADIUS_VERT = 1
+KERNEL_VERT = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*RADIUS_VERT+1, 2*RADIUS_VERT+1))
+
+RADIUS_JOINT = 10
+KERNEL_JOINT = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*RADIUS_JOINT+1, 2*RADIUS_JOINT+1))
 
 ORIG_W, ORIG_H = 1280, 720
 PADDED_H = ORIG_W
@@ -259,7 +265,7 @@ EXPECTED_CY = 1288 / 2
 
 def vis_vertices_img(frame, verts_cam_list, cam_intrinsics, frame_size):
     frame_h, frame_w = frame.shape[:2]
-    # 1) concat tous les points en numpy directement
+    # 1) concat tous les points en numpy directement 
     all_verts = np.vstack([
         v.squeeze(0) if v.ndim == 3 else v
         for v in verts_cam_list
@@ -286,28 +292,13 @@ def vis_vertices_img(frame, verts_cam_list, cam_intrinsics, frame_size):
     # 6) masque binaire + dilatation pour faire des “cercles”
     mask = np.zeros((frame_h, frame_w), np.uint8)
     mask[iy, ix] = 255
-    mask = cv2.dilate(mask, KERNEL, iterations=1)
+    mask = cv2.dilate(mask, KERNEL_VERT, iterations=1)
 
     # 7) application du rendu vert
     frame[mask==255] = (0,255,0)
     return frame
 
 def vis_vertices_img_with_tracked_pose(frame, tracked_poses, cam_intrins, frame_size, colors, input_size=1288, point_radius=8):
-    """
-    Projette et affiche plusieurs ensembles de joints 3D sur une image avec des couleurs spécifiques par ID.
-
-    Args:
-        frame: Image d'entrée (numpy array, HxWx3)
-        tracked_poses: Dictionnaire {ID: joints 3D (numpy array, Nx3)}
-        cam_intrins: Intrinsèques de la caméra pour l'image redimensionnée (torch tensor, 3x3)
-        frame_size: Dimensions de l'image originale (tuple, (largeur, hauteur))
-        colors: Dictionnaire {ID: couleur RGB (tuple, ex. (255, 0, 0))}
-        input_size: Résolution d'entrée du modèle (int, ex. 1288)
-        point_radius: Rayon des points dessinés (int)
-    
-    Returns:
-        frame: Image avec les joints rendus (numpy array)
-    """
     frame = frame.copy()
     frame_w, frame_h = frame_size
     K = cam_intrins.float()
@@ -320,11 +311,14 @@ def vis_vertices_img_with_tracked_pose(frame, tracked_poses, cam_intrins, frame_
     predicted_cy = K[1, 2]
     cy_offset = (expected_cy - predicted_cy) * (frame_h / (input_size - 2 * pad_top * scale_factor + 1e-6))
 
+    # D'abord, on prépare un dictionnaire {color: mask}
+    color_to_mask = {}
+
     for id, joints_3d in tracked_poses.items():
         if not isinstance(joints_3d, np.ndarray) or joints_3d.shape[-1] != 3:
             print(f"Joints ID {id} rejetés : Type={type(joints_3d)}, Shape={getattr(joints_3d, 'shape', 'N/A')}")
             continue
-        
+
         joints = torch.from_numpy(joints_3d).float().to(device)
         if joints.dim() == 3:
             joints = joints.squeeze(0)
@@ -342,7 +336,134 @@ def vis_vertices_img_with_tracked_pose(frame, tracked_poses, cam_intrins, frame_
 
         color = colors.get(id, (255, 255, 255))
 
-        for (x, y) in coords:
-            cv2.circle(frame, (x, y), point_radius, color, -1)
+        # Initie un masque pour cette couleur si pas encore créé
+        if color not in color_to_mask:
+            color_to_mask[color] = np.zeros((frame_h, frame_w), np.uint8)
+
+        # Place tous les points pour cet ID sur son masque
+        ix = coords[:, 0]
+        iy = coords[:, 1]
+        color_to_mask[color][iy, ix] = 255
+
+    # Ensuite pour chaque couleur, on dilate le masque puis on l'applique
+    for color, mask in color_to_mask.items():
+        dilated_mask = cv2.dilate(mask, KERNEL_JOINT, iterations=1)
+        frame[dilated_mask == 255] = color
 
     return frame
+
+def display_persistence_diagrams(diagrams, color_dict, track_ids, fig=None, ax=None):
+    """
+    Affiche les diagrammes de persistance dans une fenêtre continue avec une couleur par humain.
+    
+    Args:
+        diagrams (list): Liste de diagrammes de persistance.
+        frame_number (int): Numéro de la frame pour le titre.
+        color_dict (dict): Dictionnaire associant track_id à un tuple de couleur (r, g, b) ou (r, g, b, a).
+        track_ids (list): Liste des track_id correspondant aux diagrammes.
+        fig (matplotlib.figure.Figure): Figure existante (optionnel, pour réutilisation).
+        ax (matplotlib.axes.Axes): Axes existants (optionnel, pour réutilisation).
+    
+    Returns:
+        tuple: (fig, ax) pour réutilisation dans la boucle.
+    """
+    # Créer une nouvelle figure si aucune n'est fournie
+    if fig is None or ax is None:
+        fig, ax = plt.subplots(figsize=(8, 6))
+    
+    # Effacer les axes pour la mise à jour
+    ax.clear()
+    
+    # Déterminer la plage pour les axes
+    max_death = max([dg[:, 1].max() for dg in diagrams if dg.size > 0]) if len(diagrams) > 0 else 1.0
+    max_birth = max([dg[:, 0].max() for dg in diagrams if dg.size > 0]) if len(diagrams) > 0 else 1.0
+    max_val = max(max_birth, max_death) * 1.1  # Ajouter une marge
+    
+    # Tracer la diagonale
+    ax.plot([0, max_val], [0, max_val], 'k--', alpha=0.5)
+    
+    # Tracer les diagrammes avec les couleurs correspondantes
+    for i, (dg, track_id) in enumerate(zip(diagrams, track_ids)):
+        if dg.size > 0 and track_id in color_dict:
+            births = dg[:, 0]
+            deaths = dg[:, 1]
+            color = color_dict[track_id]
+            # Normaliser la couleur si nécessaire (matplotlib attend des valeurs entre 0 et 1)
+            if max(color) > 1:
+                color = tuple(c / 255 for c in color[:3]) + ((color[3] / 255,) if len(color) > 3 else (1.0,))
+            ax.scatter(births, deaths, color=color, label=f'Humain {track_id}', s=50, alpha=0.7)
+    
+    # Configurer les axes et la légende
+    ax.set_xlabel('Naissance')
+    ax.set_ylabel('Mort')
+    ax.set_xlim(0, max_val)
+    ax.set_ylim(0, max_val)
+    ax.set_title(f'Diagrammes de Persistance')
+    if len(diagrams) > 0:
+        ax.legend()
+    
+    # Forcer la mise à jour de l'affichage
+    fig.canvas.draw()
+    fig.canvas.flush_events()
+    
+    return fig, ax
+
+def display_distance_matrix(matrix, labels_D, labels_P, title="Matrice de Distance"):
+    """
+    Affiche une matrice de distance dans une nouvelle fenêtre.
+
+    Args:
+        matrix (np.ndarray): Matrice à afficher.
+        labels_D (list): Labels pour les lignes (ensemble D).
+        labels_P (list): Labels pour les colonnes (ensemble P).
+        title (str): Titre du graphique.
+    """
+    fig, ax = plt.subplots(figsize=(8, 6))
+    im = ax.imshow(matrix, cmap='viridis', interpolation='nearest')
+    
+    # Labels des axes
+    ax.set_xlabel('Pj (Cible)')
+    ax.set_ylabel('Di (Source)')
+    ax.set_title(title)
+    ax.set_xticks(np.arange(len(labels_P)))
+    ax.set_yticks(np.arange(len(labels_D)))
+    ax.set_xticklabels(labels_P)
+    ax.set_yticklabels(labels_D)
+    
+    # Ajout de la barre de couleur
+    fig.colorbar(im, ax=ax, label='Distance')
+    
+    # Affichage des valeurs dans les cellules
+    for i in range(matrix.shape[0]):
+        for j in range(matrix.shape[1]):
+            ax.text(j, i, f'{matrix[i, j]:.2f}', ha='center', va='center', color='white')
+    
+    plt.tight_layout()
+    plt.show()
+
+def update_cross_distance_matrix_plot(fig, ax, distance_matrix, diagrams_id_D, diagrams_id_P, title="Matrice de Distances"):
+    """Mise à jour du graphique de la matrice de distances avec surlignage de la valeur maximale par ligne."""
+    
+    # Clear the axis and re-plot the matrix
+    ax.clear()
+    cax = ax.matshow(distance_matrix, cmap='viridis')  # Afficher la matrice avec un colormap
+    fig.colorbar(cax)  # Ajouter une barre de couleur
+    
+    # Ajouter un titre
+    ax.set_title(title)
+
+    # Ajouter des labels pour les axes
+    ax.set_xticks(np.arange(len(diagrams_id_P)))
+    ax.set_yticks(np.arange(len(diagrams_id_D)))
+    ax.set_xticklabels(diagrams_id_P)
+    ax.set_yticklabels(diagrams_id_D)
+    
+    # Surligner la valeur la plus haute de chaque ligne
+    for i in range(distance_matrix.shape[0]):  # Pour chaque ligne
+        max_index = np.argmax(distance_matrix[i])  # Trouver l'indice de la valeur maximale
+        max_value = distance_matrix[i, max_index]  # Obtenir la valeur maximale
+        ax.text(max_index, i, f'{max_value:.2f}', ha='center', va='center', color='red', fontsize=12, fontweight='bold')
+
+    # Rafraîchir l'affichage
+    fig.canvas.draw()
+    fig.canvas.flush_events()

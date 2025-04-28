@@ -22,11 +22,11 @@ class VideoConfig:
 
 @dataclass
 class PHALPConfig:
-    predict: str = 'TPL'
+    predict: str = 'APL'
     pose_distance: str = 'smpl'
     distance_type: str = 'EQ_019'
     alpha: float = 0.1
-    low_th_c: float = 0.5
+    low_th_c: float = 0.4
     hungarian_th: float = 100.0
     track_history: int = 7
     max_age_track: int = 50
@@ -123,9 +123,9 @@ class SATHMRConfig:
     pretrain: bool = True
     pretrain_path: str = f"{WEIGHTS_DIR}/sat_hmr/sat_644.pth"
     infer_batch_size: int = 1
-    infer_num_workers: int = 4
+    infer_num_workers: int = 8
     distributed_infer: bool = True
-    conf_thresh: float = 0.5
+    conf_thresh: float = 0.4
     display: bool = False
     live_stream: bool = True
     use_fp16: bool = False

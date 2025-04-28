@@ -39,4 +39,6 @@ dependencies:
       - decord
       - dill
       - rich
+      - ripser
+      - persim
       - git+https://github.com/facebookresearch/segment-anything.git

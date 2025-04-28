@@ -27,6 +27,10 @@ from utils.postprocessor import Postprocessor
 from sklearn.linear_model import Ridge
 import gdown
 from smplx.lbs import batch_rodrigues  # ou bien pytorch3d.transforms.axis_angle_to_matrix
+from topology.persistence_analysis import compute_persistence_diagrams
+import matplotlib.pyplot as plt
+from gtda.homology import VietorisRipsPersistence
+from matplotlib import cm
 
 class TrackModel(nn.Module):
     def __init__(self, cfg, device, sat_model):
@@ -230,8 +234,10 @@ class TrackModel(nn.Module):
         smpl_params = instances_people.smpl_params
         
         # Generate synthetic masks
-        pred_masks = self._generate_synthetic_masks(pred_bbox, img_height, img_width)
+        #pred_masks = self._generate_synthetic_masks(pred_bbox, img_height, img_width)
         
+        pred_masks = self._generate_sam_masks(pred_bbox, image, img_height, img_width)
+
         ground_truth_track_id = [1] * len(pred_scores)
         ground_truth_annotations = [[]] * len(pred_scores)
         
@@ -429,8 +435,7 @@ class TrackModel(nn.Module):
 
         # Compute full embedding (for legacy)
         full_embedding = torch.cat((appe_embedding.cpu(), pose_embedding, loca_embedding), dim=1)
-        print(full_embedding.size())
-        print(pose_embedding.size())
+        
         # Create detection data list
         detection_data_list = []
         for i, p_ in enumerate(selected_ids):
@@ -469,11 +474,8 @@ class TrackModel(nn.Module):
         if(attibute=="P"):
 
             vectors_pose         = vectors[0]
-            print(np.shape(vectors_pose))
             vectors_data         = vectors[1]
-            print(np.shape(vectors_data))
             vectors_time         = vectors[2]
-            print(np.shape(vectors_time))
 
             en_pose              = torch.from_numpy(vectors_pose)
             en_data              = torch.from_numpy(vectors_data)
