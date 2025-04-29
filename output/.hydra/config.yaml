@@ -100,7 +100,7 @@ sathmr:
   distributed_infer: true
   conf_thresh: 0.4
   display: false
-  live_stream: true
+  live_stream: false
   use_fp16: false
   render_mode: points
   input_size: 1288

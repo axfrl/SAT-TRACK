@@ -41,4 +41,5 @@ dependencies:
       - rich
       - ripser
       - persim
+      - fiftyone
       - git+https://github.com/facebookresearch/segment-anything.git

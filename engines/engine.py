@@ -6,13 +6,14 @@ from queue import Queue
 from threading import Thread, Event
 import torch.nn.functional as F 
 from .funcs.video_stream_funcs import get_transform, preprocess_frame, create_empty_targets, write_frames
-from utils.visualization import vis_vertices_img, vis_vertices_img_with_tracked_pose, display_persistence_diagrams, update_cross_distance_matrix_plot
+from utils.visualization import vis_vertices_img, vis_vertices_img_with_tracked_pose, display_persistence_diagrams, update_cross_distance_matrix_plot, visualize_distance_matrix, generate_heatmap_image, overlay_heatmap_on_frame, generate_persistence_diagram_image, overlay_diagram_on_frame, add_left_border_to_frame
 from tracker.SAT_TRACKER import TrackModel
 import numpy as np
 import matplotlib.pyplot as plt
 from gtda.homology import VietorisRipsPersistence
 from matplotlib import cm
-from topology.persistence_analysis import compute_persistence_diagrams
+from topology.persistence_analysis import compute_persistence_diagrams, compute_cross_distance_matrix
+from utils.utils import pose_camera_vector_to_smpl, smpl_to_pred_pose_shape
 
 class Engine:
     def __init__(self, args, mode='infer', gpu_id=0):
@@ -107,8 +108,7 @@ class Engine:
         
         # Initialiser le mode interactif de matplotlib
         fig_diag, ax_diag = None, None
-        #fig_matrix, ax_matrix = plt.subplots(figsize=(8, 6))
-        plt.ion()
+        fig_matrix, ax_matrix = plt.subplots(figsize=(8, 6))
 
         while True:
             if self.live_stream:
@@ -150,47 +150,74 @@ class Engine:
                                                  frame_name=frame_name, 
                                                  t_=frame_count, 
                                                  measurments=measurements)
-            
+
             cam_intrinsics = outputs['pred_intrinsics'][0].reshape(3, 3).detach().cpu()
-            
-                # Forward tracking
+
+            # Forward tracking
             self.phalp_tracker.tracker.predict()
             self.phalp_tracker.tracker.update(detections, frame_count, frame_name, self.phalp_tracker.cfg.phalp.shot)
-            
+
             # Pose smoothing (post-processing)
             # TODO
 
-            tracked_pose = {}
+            detec_tracked_pose = {}
+            hist_tracked_pose = {}
 
             for tracks_ in self.phalp_tracker.tracker.tracks:
+                if not tracks_.is_confirmed(): 
+                    continue
+                if tracks_.time_since_update >= 5: 
+                    continue
 
-                if(not(tracks_.is_confirmed())): continue
-                if tracks_.time_since_update != 0: continue
+                track_id = tracks_.track_id
 
-                track_id        = tracks_.track_id
-                track_data_hist = tracks_.track_data['history'][-1]
-                tracked_pose[track_id] = track_data_hist['3d_joints']
-                track_data_pred = tracks_.track_data['prediction'][-1]
-            
+                track_data_detec = tracks_.track_data['history'][-1]
+                detec_tracked_pose[track_id] = track_data_detec['3d_joints']
+                if frame_count > 3:
+                    track_data_hist = tracks_.track_data['history'][-3]
+                    hist_tracked_pose[track_id] = track_data_hist['3d_joints']
+
+                """
+                pred_cam_xys = track_data_hist['pred_cam_xys']
+                pred_intrinsic = track_data_hist['pred_intrinsic']
+                track_data_pred = np.asarray(tracks_.track_data['prediction']['pose'][-1])
+                smpl_param = pose_camera_vector_to_smpl(track_data_pred)
+                pred_pose, pred_shape = smpl_to_pred_pose_shape(smpl_param)
+
+                # Store 3D joints in tracked_pose[track_id] instead of overwriting tracked_pose
+                pred_tracked_pose[track_id] = self.model.process_smpl_single(
+                    pose=pred_pose,
+                    shape=pred_shape,
+                    cam_xys=pred_cam_xys,
+                    cam_intrinsics=pred_intrinsic,
+                    device=device
+                )"""
             
             t4 = time.time()
 
-            frame_with_poses = vis_vertices_img_with_tracked_pose(frame, tracked_pose, cam_intrinsics, (frame_width, frame_height), self.phalp_tracker.color_dict)
-            
+            frame_with_poses = vis_vertices_img_with_tracked_pose(frame, detec_tracked_pose, cam_intrinsics, (frame_width, frame_height), self.phalp_tracker.color_dict)
             
             # Compute persistence diagrams using tracked_pose
 
-            
-            diagrams, diagrams_id = compute_persistence_diagrams(tracked_pose)
+            diagrams_hist_dict = compute_persistence_diagrams(hist_tracked_pose)
+            diagrams_detec_dict = compute_persistence_diagrams(detec_tracked_pose)
 
-            if len(diagrams)>0:  # Check if diagrams is non-empty
+            cross_distance_matrix = compute_cross_distance_matrix(list(diagrams_hist_dict.values()),
+                                                                  list(diagrams_detec_dict.values()),
+                                                                  epsilon=0.0)
+            heatmap_image = generate_heatmap_image(cross_distance_matrix,
+                                           list(diagrams_hist_dict.keys()),
+                                           list(diagrams_detec_dict.keys()))
+            diagram_image = generate_persistence_diagram_image(diagrams_detec_dict, self.phalp_tracker.color_dict)
+            #visualize_distance_matrix(cross_distance_matrix, diagrams_hist_dict.keys(), diagrams_detec_dict.keys())
+            """if len(diagrams)>0:  # Check if diagrams is non-empty
                 fig_diag, ax_diag = display_persistence_diagrams(diagrams, self.phalp_tracker.color_dict, diagrams_id, fig_diag, ax_diag)
             else:
                 if fig_diag is not None:
                     ax_diag.clear()
                     ax_diag.set_title(f'Diagrammes de Persistance(Aucun humain)')
                     fig_diag.canvas.draw()
-                    fig_diag.canvas.flush_events()
+                    fig_diag.canvas.flush_events()"""
 
             # Process outputs
             confs = outputs['pred_confs'][0].view(-1)
@@ -200,20 +227,38 @@ class Engine:
                 valid_verts_list = [outputs['pred_verts'][0, i].detach().cpu().numpy() for i in range(len(confs)) if valid_mask[i]]
                 rendered_img = vis_vertices_img(frame_with_poses, valid_verts_list, cam_intrinsics, (frame_width, frame_height))
 
-                
             else:
                 rendered_img = frame
 
+            rendered_img = add_left_border_to_frame(rendered_img, 500, (1,1,1))
+            frame_with_heatmap, heatmap_height = overlay_heatmap_on_frame(
+                rendered_img, 
+                heatmap_image, 
+                position=(10, 10), 
+                alpha=0.7, 
+                brightness_factor=1.5, 
+                size_factor=1.5
+            )
 
+            # Superposer les diagrammes juste en dessous de la heatmap
+            final_frame = overlay_diagram_on_frame(
+                frame_with_heatmap, 
+                diagram_image, 
+                position=(10, 10), 
+                alpha=0.7, 
+                brightness_factor=1.5, 
+                size_factor=1.5, 
+                heatmap_height=heatmap_height
+            )
             t5 = time.time()
 
             # Put result in queue for writing
-            result_queue.put((frame_count, rendered_img))
+            result_queue.put((frame_count, final_frame))
             t6 = time.time()
 
             # Display
             if display or self.live_stream:
-                cv2.imshow('Inference Output', rendered_img)
+                cv2.imshow('Inference Output', final_frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
 
@@ -229,7 +274,6 @@ class Engine:
         # Cleanup
         stop_event.set()
         cap.release()
-        plt.close(fig)
         if not self.live_stream:
             writer_thread.join()
         cv2.destroyAllWindows()

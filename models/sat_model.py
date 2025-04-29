@@ -540,8 +540,43 @@ class Model(nn.Module):
         depths = torch.cat([depths, depths/self.focal], dim=-1) # (bs, n_q, 2)
 
         return verts_cam, j3ds_cam, j2ds_img, depths, transl.flatten(2)
-
-
+    
+    def process_smpl_single(self, pose, shape, device, cam_xys, cam_intrinsics, detach_j3ds=False):
+        """
+        Args:
+            pose: torch.Tensor or np.ndarray of shape (72,) representing axis-angle pose parameters
+            shape: torch.Tensor or np.ndarray of shape (10,) representing SMPL shape parameters
+            cam_xys: torch.Tensor or np.ndarray of shape (3,) for camera translation
+            cam_intrinsics: torch.Tensor or np.ndarray of shape (3, 3) for camera intrinsics
+            detach_j3ds: bool, whether to detach joints for 2D projection
+        Returns:
+            j3ds_cam: torch.Tensor of shape (num_joints, 3) containing 3D joints in camera space
+        """
+        # Convert inputs to PyTorch tensors
+        pose = torch.as_tensor(pose, dtype=torch.float32, device=device)
+        shape = torch.as_tensor(shape, dtype=torch.float32, device=device)
+        cam_xys = torch.as_tensor(cam_xys, dtype=torch.float32, device=device).flatten()  # Ensure (3,)
+        
+        # Add batch dimension
+        pose = pose[None, :]  # (1, 72)
+        shape = shape[None, :]  # (1, 10)
+        
+        # Compute SMPL model
+        _, joints = self.human_model(poses=pose, betas=shape)  # joints: (1, num_joints, 3)
+        
+        # Remove batch dimension
+        joints = joints.squeeze(0)  # (num_joints, 3)
+        
+        # Apply camera translation
+        scale = 2 * cam_xys[2].sigmoid() + 1e-6  # scalar
+        t_xy = cam_xys[:2] / scale  # (2,)
+        t_z = (2 * self.focal) / (scale * self.input_size)  # scalar
+        transl = torch.cat([t_xy, t_z[None]], dim=0)  # (3,)
+        
+        j3ds_cam = joints + transl[None, :]  # (num_joints, 3)
+        
+        return j3ds_cam
+    
     def forward(self, samples: NestedTensor, targets, sat_use_gt = False, detach_j3ds = False):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
@@ -623,6 +658,8 @@ class Model(nn.Module):
         # shape of hs: (lvl, bs, num_queries, dim)
         outputs_pose_6d = self.mean_pose.view(1, 1, -1)
         outputs_shape = self.mean_shape.view(1, 1, -1)
+
+        pred_cam_xys = []
         for lvl in range(hs.shape[0]):
 
             outputs_pose_6d = outputs_pose_6d + self.pose_head[lvl](hs[lvl])
@@ -635,6 +672,7 @@ class Model(nn.Module):
 
                 # cam
                 cam_xys = self.cam_head(hs[lvl])
+                pred_cam_xys.append(cam_xys)
 
                 outputs_vert, outputs_j3d, outputs_j2d, depth, transl\
                 = self.process_smpl(poses = outputs_pose,
@@ -679,7 +717,8 @@ class Model(nn.Module):
                 'pred_boxes': pred_boxes[-1], 'pred_confs': pred_confs[-1], 
                'pred_j3ds': pred_j3ds[-1], 'pred_j2ds': pred_j2ds[-1],
                'pred_verts': pred_verts, 'pred_intrinsics': pred_intrinsics, 
-               'pred_depths': pred_depths[-1], 'pred_transl': pred_transl}
+               'pred_depths': pred_depths[-1], 'pred_transl': pred_transl,
+               'pred_cam_xys': pred_cam_xys}
         
         if self.aux_loss and self.training:
             out['aux_outputs'] = self._set_aux_loss(pred_poses, pred_betas,

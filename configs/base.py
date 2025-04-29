@@ -127,7 +127,7 @@ class SATHMRConfig:
     distributed_infer: bool = True
     conf_thresh: float = 0.4
     display: bool = False
-    live_stream: bool = True
+    live_stream: bool = False
     use_fp16: bool = False
     render_mode: str = 'points'
     input_size: int = 1288

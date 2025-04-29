@@ -323,6 +323,8 @@ class TrackModel(nn.Module):
         pred_j3ds = sat_data['pred_j3ds'][0]  # [num_queries, num_joints, 3]
         pred_j2ds = sat_data['pred_j2ds'][0]  # [num_queries, num_joints, 2]
         pred_transl = sat_data['pred_transl'][0]  # [num_queries, 3]
+        pred_intrinsic = sat_data['pred_intrinsics'][0]
+        pred_cam_xys = sat_data['pred_cam_xys'][0]
 
         # Convert boxes to [x1, y1, x2, y2]
         cx, cy, w, h = pred_boxes[:, 0], pred_boxes[:, 1], pred_boxes[:, 2], pred_boxes[:, 3]
@@ -411,13 +413,14 @@ class TrackModel(nn.Module):
         pred_joints_3d = pred_j3ds[selected_ids].cpu().numpy()  # [BS, num_joints, 3]
         pred_joints_2d = pred_j2ds[selected_ids].cpu().numpy()  # [BS, num_joints, 2]
         pred_cam = pred_transl[selected_ids].cpu().numpy()  # [BS, 3]
-
+        pred_cam_weak = []
         # Compute pose embedding
         if self.cfg.phalp.pose_distance == "joints":
             pose_embedding = torch.from_numpy(pred_joints_3d).view(BS, -1)
         elif self.cfg.phalp.pose_distance == "smpl":
             pose_embedding_list = []
             for i in range(BS):
+                pred_cam_weak.append(pred_cam_np[i])
                 emb_np = smpl_to_pose_camera_vector(
                     pred_smpl_params[i],      # dict avec rotmats + betas
                     pred_cam_np[i]            # [scale, tx, ty]
@@ -454,6 +457,8 @@ class TrackModel(nn.Module):
                 "smpl": pred_smpl_params[i],
                 "camera": pred_cam_[i],
                 "camera_bbox": pred_cam_[i],  # Use transl as proxy
+                "pred_intrinsic": pred_intrinsic,
+                "pred_cam_xys": pred_cam_xys,
                 "3d_joints": pred_joints_3d[i],
                 "2d_joints": pred_joints_2d_[i],
                 "size": [img_height, img_width],

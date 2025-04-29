@@ -112,7 +112,6 @@ def pose_camera_vector_to_smpl(pose_camera_vector):
     return {'global_orient': global_orient, 'body_pose': body_pose, 'betas': betas}, camera[0]
 
 def smpl_to_pose_camera_vector(smpl_params, camera):
-    print(smpl_params)
     # convert smpl parameters to camera to pose_camera_vector for smoothness.
     global_orient_  = smpl_params['global_orient'].reshape(1, -1) # 1x3x3 -> 9
     body_pose_      = smpl_params['body_pose'].reshape(1, -1) # 23x3x3 -> 207
@@ -120,7 +119,65 @@ def smpl_to_pose_camera_vector(smpl_params, camera):
     loca_           = copy.deepcopy(camera.view(1, -1)) # 3 -> 3
     loca_[:, 2]     = loca_[:, 2]/200.0
     pose_embedding  = np.concatenate((global_orient_, body_pose_, shape_, loca_.cpu().numpy()), 1)
+
     return pose_embedding
+
+# Fonction pour convertir une matrice de rotation en représentation axis-angle
+def rodrigues_inv(rotmat):
+    # S'assurer que rotmat est un Tensor
+    if isinstance(rotmat, np.ndarray):
+        rotmat = torch.from_numpy(rotmat)
+
+    # Si rotmat est 3D (par ex., (..., 3, 3)), calculer la trace sur les deux dernières dimensions
+    if rotmat.dim() > 2:
+        trace = torch.sum(rotmat.diagonal(dim1=-2, dim2=-1), dim=-1)
+    else:
+        trace = torch.trace(rotmat)
+
+    # Calculer l'angle
+    angle = torch.acos((trace - 1) / 2)
+
+    # Calculer l'axe
+    axis = torch.stack([
+        rotmat[..., 2, 1] - rotmat[..., 1, 2],
+        rotmat[..., 0, 2] - rotmat[..., 2, 0],
+        rotmat[..., 1, 0] - rotmat[..., 0, 1]
+    ], dim=-1) / (2 * torch.sin(angle)[..., None])
+
+    # Retourner l'angle multiplié par l'axe
+    return axis * angle[..., None]
+
+
+# Fonction principale
+def smpl_to_pred_pose_shape(param_smpl):
+    # Extraction des rotations globales et du corps
+    global_rot = param_smpl['global_orient'][0]  # (3, 3)
+    body_rot = param_smpl['body_pose']  # (23, 3, 3)
+
+    # Convertir les rotations en axis-angle
+    global_aa = rodrigues_inv(global_rot)  # (3,)
+    body_aa = rodrigues_inv(body_rot)  # (23, 3)
+
+    # Concaténer les paramètres axis-angle
+    pred_pose = torch.cat([global_aa, body_aa.view(-1)], dim=0)  # (72,)
+
+    # Retourner la pose prédite et les betas
+    return pred_pose, param_smpl['betas']
+
+def pose_camera_vector_to_smpl(pose_embedding):
+    # Extraire les différentes parties du vecteur d'embedding
+    global_orient_ = pose_embedding[:9].reshape(1, 3, 3)  # 9 -> 1x3x3
+    body_pose_ = pose_embedding[9:216].reshape(1, 23, 3, 3)  # 207 -> 1x23x3x3
+    shape_ = pose_embedding[216:226]  # 10 -> 10
+    
+    # Reconstruction des paramètres SMPL et de la caméra
+    smpl_params = {
+        'global_orient': global_orient_,
+        'body_pose': body_pose_,
+        'betas': shape_
+    }
+    
+    return smpl_params
 
 def convert_pkl(old_pkl):
     # Code adapted from https://github.com/nkolot/ProHMR

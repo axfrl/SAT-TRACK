@@ -11,7 +11,7 @@ try:
 except:
     print(colored('pyrender is not correctly imported.', 'red'))
 import matplotlib
-from matplotlib import colormaps
+from matplotlib import colors
 from matplotlib.colors import LightSource
 import matplotlib.pyplot as plt
 from matplotlib import cm
@@ -23,6 +23,7 @@ from scipy.spatial.transform import Rotation as R
 import torchvision
 from .transforms import adjust_colors
 from gtda.homology import VietorisRipsPersistence
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 BASE_COLORS = np.loadtxt(os.path.abspath(os.path.join(__file__, "../colors.txt")), skiprows=0)/255.
 BASE_COLORS = adjust_colors(BASE_COLORS,
@@ -317,7 +318,10 @@ def vis_vertices_img_with_tracked_pose(frame, tracked_poses, cam_intrins, frame_
     for id, joints_3d in tracked_poses.items():
         if not isinstance(joints_3d, np.ndarray) or joints_3d.shape[-1] != 3:
             print(f"Joints ID {id} rejetés : Type={type(joints_3d)}, Shape={getattr(joints_3d, 'shape', 'N/A')}")
-            continue
+            if isinstance(joints_3d, torch.Tensor):
+                joints_3d = joints_3d.cpu().numpy()
+            else:
+                continue
 
         joints = torch.from_numpy(joints_3d).float().to(device)
         if joints.dim() == 3:
@@ -351,6 +355,25 @@ def vis_vertices_img_with_tracked_pose(frame, tracked_poses, cam_intrins, frame_
         frame[dilated_mask == 255] = color
 
     return frame
+
+def add_left_border_to_frame(frame, border_width=300, border_color=(0, 0, 0)):
+    """
+    Ajoute un bandereau vertical à gauche de la frame vidéo.
+
+    Args:
+        frame (np.ndarray): Frame vidéo (hauteur, largeur, 3).
+        border_width (int): Largeur du bandereau en pixels (par défaut : 300).
+        border_color (tuple): Couleur du bandereau en BGR (par défaut : noir (0, 0, 0)).
+
+    Returns:
+        np.ndarray: Frame avec le bandereau ajouté à gauche.
+    """
+    height, width, channels = frame.shape
+    # Créer une image pour le bandereau (même hauteur, largeur spécifiée, même nombre de canaux)
+    border = np.full((height, border_width, channels), border_color, dtype=np.uint8)
+    # Concaténer le bandereau à gauche de la frame
+    frame_with_border = np.hstack((border, frame))
+    return frame_with_border
 
 def display_persistence_diagrams(diagrams, color_dict, track_ids, fig=None, ax=None):
     """
@@ -408,38 +431,90 @@ def display_persistence_diagrams(diagrams, color_dict, track_ids, fig=None, ax=N
     
     return fig, ax
 
-def display_distance_matrix(matrix, labels_D, labels_P, title="Matrice de Distance"):
+def visualize_distance_matrix(distance_matrix, ids_set1, ids_set2, title="Cross-Distance Matrix Heatmap"):
     """
-    Affiche une matrice de distance dans une nouvelle fenêtre.
+    Affiche ou met à jour une heatmap pour une matrice de distances croisées entre deux ensembles
+    de diagrammes de persistance. Gère les matrices vides.
 
     Args:
-        matrix (np.ndarray): Matrice à afficher.
-        labels_D (list): Labels pour les lignes (ensemble D).
-        labels_P (list): Labels pour les colonnes (ensemble P).
-        title (str): Titre du graphique.
+        distance_matrix (np.ndarray or torch.Tensor): Matrice de distances de forme (n_set1, n_set2).
+        ids_set1 (list): Liste des IDs pour le premier ensemble (lignes).
+        ids_set2 (list): Liste des IDs pour le deuxième ensemble (colonnes).
+        title (str): Titre de la heatmap.
     """
-    fig, ax = plt.subplots(figsize=(8, 6))
-    im = ax.imshow(matrix, cmap='viridis', interpolation='nearest')
-    
-    # Labels des axes
-    ax.set_xlabel('Pj (Cible)')
-    ax.set_ylabel('Di (Source)')
-    ax.set_title(title)
-    ax.set_xticks(np.arange(len(labels_P)))
-    ax.set_yticks(np.arange(len(labels_D)))
-    ax.set_xticklabels(labels_P)
-    ax.set_yticklabels(labels_D)
-    
-    # Ajout de la barre de couleur
-    fig.colorbar(im, ax=ax, label='Distance')
-    
-    # Affichage des valeurs dans les cellules
-    for i in range(matrix.shape[0]):
-        for j in range(matrix.shape[1]):
-            ax.text(j, i, f'{matrix[i, j]:.2f}', ha='center', va='center', color='white')
-    
-    plt.tight_layout()
-    plt.show()
+    # Convertit en NumPy si c'est un tenseur PyTorch
+    if isinstance(distance_matrix, torch.Tensor):
+        distance_matrix = distance_matrix.cpu().numpy()
+
+    # Vérifie que la matrice est un tableau NumPy
+    if not isinstance(distance_matrix, np.ndarray):
+        raise TypeError(f"La matrice doit être un np.ndarray ou torch.Tensor, type trouvé : {type(distance_matrix)}")
+
+    # Crée une figure si elle n'existe pas
+    if not hasattr(visualize_distance_matrix, 'fig'):
+        plt.ion()  # Mode interactif
+        visualize_distance_matrix.fig, visualize_distance_matrix.ax = plt.subplots()
+        visualize_distance_matrix.heatmap = None
+        visualize_distance_matrix.cbar = None
+
+    # Nettoie l'axe
+    visualize_distance_matrix.ax.clear()
+
+    # Vérifie si la matrice est vide
+    if distance_matrix.size == 0 or distance_matrix.shape[0] == 0 or distance_matrix.shape[1] == 0:
+        visualize_distance_matrix.ax.text(
+            0.5, 0.5, "Matrice vide : aucune donnée détectée",
+            horizontalalignment='center', verticalalignment='center',
+            transform=visualize_distance_matrix.ax.transAxes
+        )
+        visualize_distance_matrix.ax.set_xticks([])
+        visualize_distance_matrix.ax.set_yticks([])
+        visualize_distance_matrix.ax.set_xlabel('IDs Set 2')
+        visualize_distance_matrix.ax.set_ylabel('IDs Set 1')
+        visualize_distance_matrix.ax.set_title(f"{title} (Vide)")
+        visualize_distance_matrix.fig.canvas.draw()
+        visualize_distance_matrix.fig.canvas.flush_events()
+        plt.pause(0.001)
+        print(f"Warning: Matrice vide pour {title}, shape: {distance_matrix.shape}")
+        return
+
+    # Vérifie la compatibilité des dimensions
+    if distance_matrix.shape[0] != len(ids_set1) or distance_matrix.shape[1] != len(ids_set2):
+        raise ValueError(f"Dimensions incohérentes : matrice {distance_matrix.shape}, "
+                        f"ids_set1 {len(ids_set1)}, ids_set2 {len(ids_set2)}")
+
+    # Crée une normalisation pour la colormap
+    norm = colors.Normalize(vmin=np.min(distance_matrix), vmax=np.max(distance_matrix))
+
+    # Affiche la heatmap
+    visualize_distance_matrix.heatmap = visualize_distance_matrix.ax.imshow(
+        distance_matrix,
+        cmap='viridis',
+        norm=norm,
+        interpolation='nearest'
+    )
+
+    # Ajoute ou met à jour la colorbar
+    if visualize_distance_matrix.cbar is None:
+        visualize_distance_matrix.cbar = visualize_distance_matrix.fig.colorbar(
+            visualize_distance_matrix.heatmap, ax=visualize_distance_matrix.ax
+        )
+    else:
+        visualize_distance_matrix.cbar.update_normal(visualize_distance_matrix.heatmap)
+
+    # Configure les étiquettes des axes
+    visualize_distance_matrix.ax.set_xticks(np.arange(len(ids_set2)))
+    visualize_distance_matrix.ax.set_yticks(np.arange(len(ids_set1)))
+    visualize_distance_matrix.ax.set_xticklabels(ids_set2)
+    visualize_distance_matrix.ax.set_yticklabels(ids_set1)
+    visualize_distance_matrix.ax.set_xlabel('IDs Set 2')
+    visualize_distance_matrix.ax.set_ylabel('IDs Set 1')
+    visualize_distance_matrix.ax.set_title(title)
+
+    # Met à jour la figure
+    visualize_distance_matrix.fig.canvas.draw()
+    visualize_distance_matrix.fig.canvas.flush_events()
+    plt.pause(0.001)
 
 def update_cross_distance_matrix_plot(fig, ax, distance_matrix, diagrams_id_D, diagrams_id_P, title="Matrice de Distances"):
     """Mise à jour du graphique de la matrice de distances avec surlignage de la valeur maximale par ligne."""
@@ -467,3 +542,232 @@ def update_cross_distance_matrix_plot(fig, ax, distance_matrix, diagrams_id_D, d
     # Rafraîchir l'affichage
     fig.canvas.draw()
     fig.canvas.flush_events()
+
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+def generate_heatmap_image(distance_matrix, ids_set1, ids_set2, title="Matrice de Distances Croisées"):
+    """
+    Génère une image de heatmap à partir de la matrice de distances croisées.
+
+    Args:
+        distance_matrix (np.ndarray or torch.Tensor): Matrice de distances.
+        ids_set1 (list): Liste des IDs pour les lignes (par ex., hist_tracked_pose).
+        ids_set2 (list): Liste des IDs pour les colonnes (par ex., detec_tracked_pose).
+        title (str): Titre de la heatmap.
+
+    Returns:
+        np.ndarray: Image de la heatmap (hauteur, largeur, 3) en RGB.
+    """
+    # Convertit en NumPy si c'est un tenseur PyTorch
+    if isinstance(distance_matrix, torch.Tensor):
+        distance_matrix = distance_matrix.cpu().numpy()
+
+    # Créer une figure Matplotlib
+    fig, ax = plt.subplots(figsize=(4, 3))  # Taille réduite pour superposition
+
+    if distance_matrix.size == 0 or distance_matrix.shape[0] == 0 or distance_matrix.shape[1] == 0:
+        # Si la matrice est vide, afficher un message
+        ax.text(0.5, 0.5, "Matrice vide", horizontalalignment='center', verticalalignment='center')
+        ax.set_title(title)
+        ax.axis('off')
+    else:
+        # Afficher la heatmap avec les données
+        norm = plt.Normalize(vmin=np.min(distance_matrix), vmax=np.max(distance_matrix))
+        im = ax.imshow(distance_matrix, cmap='viridis', norm=norm, interpolation='nearest')
+        ax.set_xticks(np.arange(len(ids_set2)))
+        ax.set_yticks(np.arange(len(ids_set1)))
+        ax.set_xticklabels(ids_set2)
+        ax.set_yticklabels(ids_set1)
+        ax.set_title(title)
+        fig.colorbar(im, ax=ax)
+
+    # Convertir la figure en image NumPy
+    canvas = FigureCanvasAgg(fig)
+    canvas.draw()
+    
+    # Obtenir les données RGBA
+    rgba = np.asarray(canvas.buffer_rgba())
+    
+    # Convertir RGBA en RGB (supprimer le canal alpha)
+    image = rgba[:, :, :3]  # Prendre les 3 premiers canaux (RGB)
+    
+    plt.close(fig)  # Fermer la figure pour libérer la mémoire
+    return image
+
+def overlay_heatmap_on_frame(frame, heatmap_image, position=(10, 10), alpha=0.7, brightness_factor=1.5, size_factor=1.5):
+    """
+    Superpose l'image de la heatmap sur la frame vidéo, dans le bandereau à gauche, avec luminosité et taille ajustées.
+
+    Args:
+        frame (np.ndarray): Frame vidéo (hauteur, largeur, 3).
+        heatmap_image (np.ndarray): Image de la heatmap (hauteur_hm, largeur_hm, 3).
+        position (tuple): Position (x, y) où placer la heatmap (par défaut : (10, 10)).
+        alpha (float): Transparence de la heatmap.
+        brightness_factor (float): Facteur de luminosité pour la heatmap.
+        size_factor (float): Facteur d'agrandissement (par défaut : 1.5 pour 1/3 de la frame).
+
+    Returns:
+        tuple: (frame avec heatmap superposée, hauteur redimensionnée de la heatmap).
+    """
+    frame_copy = frame.copy()
+    x_hm, y_hm = position
+    h_hm, w_hm, _ = heatmap_image.shape
+
+    # Augmenter la luminosité de la heatmap
+    heatmap_bright = increase_brightness(heatmap_image, brightness_factor)
+
+    # Redimensionner la heatmap pour qu'elle soit plus grande (1/3 de la frame)
+    scale = min(frame.shape[0] / 3 / h_hm, (frame.shape[1] / 3) / w_hm) * size_factor
+    new_h_hm, new_w_hm = int(h_hm * scale), int(w_hm * scale)
+    heatmap_resized = cv2.resize(heatmap_bright, (new_w_hm, new_h_hm), interpolation=cv2.INTER_AREA)
+
+    # S'assurer que la région d'intérêt (ROI) reste dans les limites de la frame
+    y_end_hm = min(y_hm + new_h_hm, frame.shape[0])
+    x_end_hm = min(x_hm + new_w_hm, frame.shape[1])
+    roi_hm = frame_copy[y_hm:y_end_hm, x_hm:x_end_hm]
+
+    # Ajuster la heatmap redimensionnée à la taille de la ROI
+    heatmap_resized = heatmap_resized[:y_end_hm - y_hm, :x_end_hm - x_hm]
+
+    # Superposer avec transparence
+    blended_hm = cv2.addWeighted(roi_hm, 1 - alpha, heatmap_resized, alpha, 0)
+    frame_copy[y_hm:y_end_hm, x_hm:x_end_hm] = blended_hm
+
+    return frame_copy, new_h_hm
+
+def overlay_diagram_on_frame(frame, diagram_image, position=(10, 10), alpha=0.7, brightness_factor=1.5, size_factor=1.5, heatmap_height=None):
+    """
+    Superpose l'image des diagrammes de persistance sur la frame vidéo, dans le bandereau, avec luminosité et taille ajustées.
+
+    Args:
+        frame (np.ndarray): Frame vidéo (hauteur, largeur, 3).
+        diagram_image (np.ndarray): Image des diagrammes (hauteur_dg, largeur_dg, 3).
+        position (tuple): Position (x, y) où placer les diagrammes.
+        alpha (float): Transparence des diagrammes.
+        brightness_factor (float): Facteur de luminosité pour les diagrammes.
+        size_factor (float): Facteur d'agrandissement.
+        heatmap_height (int, optional): Hauteur de la heatmap pour position relative.
+
+    Returns:
+        np.ndarray: Frame avec diagrammes superposés.
+    """
+    if diagram_image is None:
+        return frame
+
+    frame_copy = frame.copy()
+    x_dg, y_dg = position
+    h_dg, w_dg, _ = diagram_image.shape
+
+    # Si heatmap_height est fourni, ajuster la position
+    if heatmap_height is not None:
+        x_dg = x_dg
+        y_dg = position[1] + heatmap_height + 10
+
+    # Augmenter la luminosité des diagrammes
+    diagram_bright = increase_brightness(diagram_image, brightness_factor)
+
+    # Redimensionner les diagrammes pour qu'ils soient plus grands
+    scale = min(frame.shape[0] / 3 / h_dg, (frame.shape[1] / 3) / w_dg) * size_factor
+    new_w_dg = int(w_dg * scale)
+    new_h_dg = int(h_dg * new_w_dg / w_dg)  # Conserver le ratio
+    diagram_resized = cv2.resize(diagram_bright, (new_w_dg, new_h_dg), interpolation=cv2.INTER_AREA)
+
+    # S'assurer que la région d'intérêt (ROI) reste dans les limites de la frame
+    y_end_dg = min(y_dg + new_h_dg, frame.shape[0])
+    x_end_dg = min(x_dg + new_w_dg, frame.shape[1])
+    roi_dg = frame_copy[y_dg:y_end_dg, x_dg:x_end_dg]
+
+    # Ajuster l'image redimensionnée à la taille de la ROI
+    diagram_resized = diagram_resized[:y_end_dg - y_dg, :x_end_dg - x_dg]
+
+    # Superposer avec transparence
+    blended_dg = cv2.addWeighted(roi_dg, 1 - alpha, diagram_resized, alpha, 0)
+    frame_copy[y_dg:y_end_dg, x_dg:x_end_dg] = blended_dg
+
+    return frame_copy
+
+def increase_brightness(image, brightness_factor=1.5):
+    """
+    Augmente la luminosité d'une image RGB.
+
+    Args:
+        image (np.ndarray): Image RGB (hauteur, largeur, 3).
+        brightness_factor (float): Facteur de luminosité (> 1 pour augmenter, < 1 pour diminuer, par défaut : 1.5).
+
+    Returns:
+        np.ndarray: Image avec luminosité augmentée.
+    """
+    # Convertir en HSV
+    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+    # Augmenter la composante V (luminosité)
+    hsv[:, :, 2] = np.clip(hsv[:, :, 2] * brightness_factor, 0, 255)
+    # Reconvertir en RGB
+    bright_image = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+    return bright_image
+
+def generate_persistence_diagram_image(diagrams_dict, color_dict=None, title="Diagrammes de Persistance"):
+    """
+    Génère une image des diagrammes de persistance à partir d'un dictionnaire, avec des couleurs par ID
+    et une diagonale y=x en ligne hachée.
+
+    Args:
+        diagrams_dict (dict): Dictionnaire {ID: np.ndarray} contenant les diagrammes de persistance.
+        color_dict (dict, optional): Dictionnaire {ID: couleur} pour colorer les diagrammes.
+                                    Couleurs peuvent être des strings (ex. 'red') ou des tuples RGB (ex. (255, 0, 0)).
+        title (str): Titre du diagramme.
+
+    Returns:
+        np.ndarray: Image des diagrammes (hauteur, largeur, 3) en RGB.
+    """
+    fig, ax = plt.subplots(figsize=(4, 3))
+
+    if not diagrams_dict:
+        ax.text(0.5, 0.5, "Aucun diagramme", horizontalalignment='center', verticalalignment='center')
+        ax.set_title(title)
+        ax.axis('off')
+    else:
+        max_val = 0
+        for diagram_id, diagram in diagrams_dict.items():
+            if diagram.size == 0:
+                print(f"Diagramme vide pour ID {diagram_id}")
+                continue
+
+            # Extraire les temps de naissance et de mort
+            birth = diagram[:, 0]
+            death = diagram[:, 1]
+            # Ignorer les points à l'infini
+            finite_mask = np.isfinite(death)
+            birth = birth[finite_mask]
+            death = death[finite_mask]
+            if len(birth) == 0:
+                print(f"Aucun point fini dans le diagramme pour ID {diagram_id}")
+                continue
+
+            # Obtenir la couleur depuis color_dict
+            color = color_dict.get(diagram_id, 'blue') if color_dict else 'blue'
+            # Convertir les tuples RGB (0-255) en format Matplotlib (0-1) si nécessaire
+            if isinstance(color, tuple) and len(color) == 3:
+                # Si BGR (OpenCV), convertir en RGB
+                color = (color[2], color[1], color[0]) if color_dict.get('format') == 'BGR' else color
+                color = tuple(c / 255.0 for c in color)
+
+            # Tracer les points avec la couleur unique
+            ax.scatter(birth, death, s=10, label=f'ID {diagram_id}', c=color, alpha=0.6)
+            max_val = max(max_val, np.max(birth), np.max(death))
+
+        if max_val > 0:
+            # Tracer la diagonale y=x en ligne hachée (tiret-point)
+            ax.plot([0, max_val], [0, max_val], '-.', color='0.2', linewidth=1.5, alpha=0.5)
+            ax.set_xlim(0, max_val * 1.1)
+            ax.set_ylim(0, max_val * 1.1)
+            ax.set_xlabel('Birth')
+            ax.set_ylabel('Death')
+            ax.legend()
+        ax.set_title(title)
+
+    canvas = FigureCanvasAgg(fig)
+    canvas.draw()
+    rgba = np.asarray(canvas.buffer_rgba())
+    image = rgba[:, :, :3]
+    plt.close(fig)
+    return image
