@@ -255,23 +255,29 @@ def render_mesh(height, width, meshes, face, cam_intrinsics, colors = None):
 RADIUS_VERT = 1
 KERNEL_VERT = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*RADIUS_VERT+1, 2*RADIUS_VERT+1))
 
-RADIUS_JOINT = 10
+RADIUS_JOINT = 5
 KERNEL_JOINT = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*RADIUS_JOINT+1, 2*RADIUS_JOINT+1))
 
-ORIG_W, ORIG_H = 1280, 720
-PADDED_H = ORIG_W
-PAD_TOP = (PADDED_H - ORIG_H) // 2
-SCALE_FACTOR = 1288 / PADDED_H  # input_size / padded_h
-EXPECTED_CY = 1288 / 2
-
 def vis_vertices_img(frame, verts_cam_list, cam_intrinsics, frame_size):
+    ORIG_W, ORIG_H = frame_size
+    PADDED_H = ORIG_W
+    PAD_TOP = (PADDED_H - ORIG_H) // 2
+    input_size = 1288  # taille d'entrée du modèle
+    SCALE_FACTOR = input_size / PADDED_H
+    EXPECTED_CY = input_size / 2
+    N_SAMPLES = 100000
+
     frame_h, frame_w = frame.shape[:2]
+
     # 1) concat tous les points en numpy directement 
     all_verts = np.vstack([
         v.squeeze(0) if v.ndim == 3 else v
         for v in verts_cam_list
     ]).astype(np.float32)  # (N,3)
 
+    if all_verts.shape[0] > N_SAMPLES:
+        idx = np.random.choice(all_verts.shape[0], N_SAMPLES, replace=False)
+        all_verts = all_verts[idx]
     # 2) projection homogène en numpy
     K = cam_intrinsics.cpu().numpy().astype(np.float32)
     verts_homo = all_verts @ K.T                # (N,3)
@@ -279,16 +285,16 @@ def vis_vertices_img(frame, verts_cam_list, cam_intrinsics, frame_size):
 
     # 3) ajustement de l’offset en y
     predicted_cy = K[1,2]
-    cy_offset = (EXPECTED_CY - predicted_cy) * (frame_h / (1288 - 2 * PAD_TOP * SCALE_FACTOR))
+    cy_offset = (EXPECTED_CY - predicted_cy) * (frame_h / (input_size - 2 * PAD_TOP * SCALE_FACTOR))
 
     # 4) passage à l’échelle vers la taille de la frame
-    xs = pts2d[:,0] * (frame_w / 1288)
-    ys = (pts2d[:,1] - PAD_TOP * SCALE_FACTOR) * (frame_h / (1288 - 2 * PAD_TOP * SCALE_FACTOR))
+    xs = pts2d[:,0] * (frame_w / input_size)
+    ys = (pts2d[:,1] - PAD_TOP * SCALE_FACTOR) * (frame_h / (input_size - 2 * PAD_TOP * SCALE_FACTOR))
     ys += cy_offset
 
     # 5) clipping et entiers
-    ix = np.clip(xs, 0, frame_w-1).astype(np.int32)
-    iy = np.clip(ys, 0, frame_h-1).astype(np.int32)
+    ix = np.clip(xs, 0, frame_w - 1).astype(np.int32)
+    iy = np.clip(ys, 0, frame_h - 1).astype(np.int32)
 
     # 6) masque binaire + dilatation pour faire des “cercles”
     mask = np.zeros((frame_h, frame_w), np.uint8)
@@ -296,7 +302,7 @@ def vis_vertices_img(frame, verts_cam_list, cam_intrinsics, frame_size):
     mask = cv2.dilate(mask, KERNEL_VERT, iterations=1)
 
     # 7) application du rendu vert
-    frame[mask==255] = (0,255,0)
+    frame[mask == 255] = (0, 255, 0)
     return frame
 
 def vis_vertices_img_with_tracked_pose(frame, tracked_poses, cam_intrins, frame_size, colors, input_size=1288, point_radius=8):
@@ -543,9 +549,7 @@ def update_cross_distance_matrix_plot(fig, ax, distance_matrix, diagrams_id_D, d
     fig.canvas.draw()
     fig.canvas.flush_events()
 
-from matplotlib.backends.backend_agg import FigureCanvasAgg
-
-def generate_heatmap_image(distance_matrix, ids_set1, ids_set2, title="Matrice de Distances Croisées"):
+def generate_heatmap_image(distance_matrix, ids_set1, ids_set2, title="Diagram cross-distance matrix"):
     """
     Génère une image de heatmap à partir de la matrice de distances croisées.
 
@@ -705,7 +709,7 @@ def increase_brightness(image, brightness_factor=1.5):
     bright_image = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
     return bright_image
 
-def generate_persistence_diagram_image(diagrams_dict, color_dict=None, title="Diagrammes de Persistance"):
+def generate_persistence_diagram_image(diagrams_dict, color_dict=None, title="Persistence Diagram"):
     """
     Génère une image des diagrammes de persistance à partir d'un dictionnaire, avec des couleurs par ID
     et une diagonale y=x en ligne hachée.

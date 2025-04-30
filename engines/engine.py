@@ -1,18 +1,29 @@
-import torch
-import cv2
 import os
 import time
-from queue import Queue
-from threading import Thread, Event
-import torch.nn.functional as F 
-from .funcs.video_stream_funcs import get_transform, preprocess_frame, create_empty_targets, write_frames
-from utils.visualization import vis_vertices_img, vis_vertices_img_with_tracked_pose, display_persistence_diagrams, update_cross_distance_matrix_plot, visualize_distance_matrix, generate_heatmap_image, overlay_heatmap_on_frame, generate_persistence_diagram_image, overlay_diagram_on_frame, add_left_border_to_frame
-from tracker.SAT_TRACKER import TrackModel
+import threading
+import queue
+
+import cv2
+import torch
+import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
-from gtda.homology import VietorisRipsPersistence
-from matplotlib import cm
-from topology.persistence_analysis import compute_persistence_diagrams, compute_cross_distance_matrix
+
+from .funcs.video_stream_funcs import get_transform, preprocess_frame, create_empty_targets
+from utils.visualization import (
+    vis_vertices_img,
+    vis_vertices_img_with_tracked_pose,
+    generate_heatmap_image,
+    generate_persistence_diagram_image,
+    overlay_heatmap_on_frame,
+    overlay_diagram_on_frame,
+    add_left_border_to_frame
+)
+from tracker.SAT_TRACKER import TrackModel
+from topology.persistence_analysis import (
+    compute_persistence_diagrams,
+    compute_cross_distance_matrix
+)
 from utils.utils import pose_camera_vector_to_smpl, smpl_to_pred_pose_shape
 
 class Engine:
@@ -22,260 +33,171 @@ class Engine:
         self.output_dir = args.video.output_dir
         self.live_stream = args.sathmr.live_stream
         self.use_fp16 = args.sathmr.use_fp16
-        self.render_mode = args.sathmr.render_mode  # 'points' or 'mesh'
+        self.render_mode = args.sathmr.render_mode
         self.gpu_id = gpu_id
-        self.device = self.set_device(gpu_id)
+        self.device = self._set_device(gpu_id)
         os.makedirs(self.output_dir, exist_ok=True)
-        self.prepare_models(args.sathmr)
+        self._prepare_models(args.sathmr)
         self.phalp_tracker = TrackModel(args, self.device, self.model)
-    
-    def set_device(self, gpu_id=0):
-        """Set device for a specific GPU or CPU."""
+
+    def _set_device(self, gpu_id=0):
         if torch.cuda.is_available() and gpu_id < torch.cuda.device_count():
             return torch.device(f'cuda:{gpu_id}')
         return torch.device('cpu')
-    
-    def prepare_models(self, args):
-        """Build and load the SAT-HMR model."""
-        from models.sat_model import build_sat_model  # Delayed import to avoid circular dependencies
+
+    def _prepare_models(self, sathmr_args):
+        from models.sat_model import build_sat_model
         print(f'Preparing models on GPU {self.gpu_id}...')
-        self.model, _ = build_sat_model(args, set_criterion=False)
-        if args.pretrain:
-            print(f'Loading pretrained weights: {args.pretrain_path}')
-            state_dict = torch.load(args.pretrain_path, weights_only=True)
-            if 'encoder_pos_embeds' in state_dict:
-                expected_size = (args.input_size // 14, args.input_size // 14)
-                checkpoint_size = state_dict['encoder_pos_embeds'].shape[:2]
-                if expected_size != checkpoint_size:
-                    print(f"Adapting encoder_pos_embeds from {checkpoint_size} to {expected_size}")
-                    pos_embeds = state_dict['encoder_pos_embeds'].permute(2, 0, 1).unsqueeze(0)
-                    pos_embeds = F.interpolate(pos_embeds, size=expected_size, mode='bicubic', align_corners=False)
-                    state_dict['encoder_pos_embeds'] = pos_embeds.squeeze(0).permute(1, 2, 0)
+        self.model, _ = build_sat_model(sathmr_args, set_criterion=False)
+        if sathmr_args.pretrain:
+            state_dict = torch.load(sathmr_args.pretrain_path, weights_only=True)
             self.model.load_state_dict(state_dict, strict=False)
-        self.model.eval()
-        self.model.to(self.device)
+        self.model.eval().to(self.device)
         if self.use_fp16:
             self.model = self.model.half()
         print(f'Model is on device: {self.device}')
-        if 'cuda' in str(self.device):
-            print(f'GPU Name: {torch.cuda.get_device_name(self.device)}')
-        else:
-            print('Warning: Model is running on CPU')
 
-    def read_frames(self, cap, queue):
-        """Read frames asynchronously."""
-        while cap.isOpened():
+    def _reader(self, cap, frame_queue, stop_event):
+        while not stop_event.is_set():
             ret, frame = cap.read()
             if not ret:
                 break
-            queue.put(frame)
-        queue.put(None)
+            frame_queue.put(frame)
+        frame_queue.put(None)
 
-    def infer_video(self, input_video, output_video, input_size, conf_thresh, display):
-        """Process a video or live stream on a single GPU."""
-        device = self.device
+    def _pad_frame_to_standard_resolution(self, frame, target_width=1920, target_height=1080):
+        h, w = frame.shape[:2]
+        top = (target_height - h) // 2
+        bottom = target_height - h - top
+        left = (target_width - w) // 2
+        right = target_width - w - left
+        padded = cv2.copyMakeBorder(frame, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+        return padded
 
-        # Open video
+    def _writer(self, output_path, width, height, fps, result_queue, stop_event):
+        writer_initialized = False
+        writer = None
+        target_width, target_height = 1920, 1080
+        n_frames_written = 0
+
+        while not stop_event.is_set():
+            try:
+                result = result_queue.get(timeout=1)
+                if result is None:
+                    break
+
+                padded_result = self._pad_frame_to_standard_resolution(result, target_width, target_height)
+
+                if not writer_initialized:
+                    print(f"[Writer] Initializing writer with size: {target_width}x{target_height}")
+                    writer = cv2.VideoWriter(
+                        output_path,
+                        cv2.VideoWriter_fourcc(*'mp4v'),
+                        fps,
+                        (target_width, target_height)
+                    )
+                    writer_initialized = True
+
+                writer.write(padded_result)
+                n_frames_written += 1
+
+            except queue.Empty:
+                continue
+
+        if writer is not None:
+            writer.release()
+        print(f"[Writer] Total frames written: {n_frames_written}")
+
+    def _process_frame(self, frame, frame_id, input_size, conf_thresh, display):
+        h, w = frame.shape[:2]
+        transform = get_transform(input_size=input_size, orig_h=h, orig_w=w, device=self.device)
+        tensor = preprocess_frame(frame, transform, self.device)
+        if self.use_fp16:
+            tensor = tensor.half()
+
+        with torch.no_grad():
+            outputs = self.model(tensor, create_empty_targets(self.device, [h, w]))
+
+        pad_h, pad_w = input_size - h, input_size - w
+        left, top = pad_w // 2, pad_h // 2
+        dets = self.phalp_tracker.get_human_features(
+            sat_data=outputs,
+            image=frame,
+            frame_name=str(frame_id),
+            t_=frame_id,
+            measurments=(h, w, input_size, left, top)
+        )
+        K = outputs['pred_intrinsics'][0].reshape(3,3).detach().cpu()
+        self.phalp_tracker.tracker.predict()
+        self.phalp_tracker.tracker.update(dets, frame_id, str(frame_id), self.phalp_tracker.cfg.phalp.shot)
+
+        detec_pose, hist_pose = {}, {}
+        for tr in self.phalp_tracker.tracker.tracks:
+            if not tr.is_confirmed() or tr.time_since_update >= 5:
+                continue
+            tid = tr.track_id
+            history = tr.track_data['history']
+            detec_pose[tid] = history[-1]['3d_joints']
+            if len(history) > 3:
+                hist_pose[tid] = history[-3]['3d_joints']
+
+        diag_hist = compute_persistence_diagrams(hist_pose)
+        diag_detec = compute_persistence_diagrams(detec_pose)
+        dist_mat = compute_cross_distance_matrix(list(diag_hist.values()), list(diag_detec.values()), epsilon=0.0)
+
+        heatmap = generate_heatmap_image(dist_mat, list(diag_hist.keys()), list(diag_detec.keys()))
+        diagram_img = generate_persistence_diagram_image(diag_detec, self.phalp_tracker.color_dict)
+
+        confs = outputs['pred_confs'][0].view(-1)
+        if (mask := confs > conf_thresh).any():
+            verts = [outputs['pred_verts'][0,i].cpu().numpy() for i,v in enumerate(confs) if mask[i]]
+            frame = vis_vertices_img(frame, verts, K, (w, h))
+            frame = vis_vertices_img_with_tracked_pose(frame, detec_pose, K, (w,h), self.phalp_tracker.color_dict)
+
+        frame = add_left_border_to_frame(frame, 500, (1,1,1))
+        frame, hmap_h = overlay_heatmap_on_frame(frame, heatmap, position=(10,10), alpha=0.7, brightness_factor=1.5, size_factor=1.5)
+        final = overlay_diagram_on_frame(frame, diagram_img, position=(10,10), alpha=0.7, brightness_factor=1.5, size_factor=1.5, heatmap_height=hmap_h)
+        return final
+
+    def infer_video(self, input_video, output_video, input_size, conf_thresh, display=False):
         cap = cv2.VideoCapture(input_video)
         if not cap.isOpened():
-            raise ValueError(f"Could not open video file: {input_video}")
+            raise RuntimeError(f"Cannot open video {input_video}")
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not fps or fps <= 0 or np.isnan(fps):
+            print("[Warning] Invalid FPS detected, using 30.0")
+            fps = 30.0
+        else:
+            print(f"[INFO] Detected input FPS: {fps}")
 
-        # Video properties
-        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        frame_queue = queue.Queue(maxsize=10)
+        result_queue = queue.Queue(maxsize=10)
+        stop_event = threading.Event()
 
-        # Frame queue for async reading (if live stream)
-        frame_queue = Queue(maxsize=10)
-        if self.live_stream:
-            reader_thread = Thread(target=self.read_frames, args=(cap, frame_queue))
-            reader_thread.start()
-
-        # Result queue for video writing
-        result_queue = Queue()
-        stop_event = Event()
-        if not self.live_stream:
-            writer_thread = Thread(target=write_frames, args=(output_video, frame_width, frame_height, fps, result_queue, stop_event))
-            writer_thread.start()
+        reader = threading.Thread(target=self._reader, args=(cap, frame_queue, stop_event), daemon=True)
+        writer = threading.Thread(target=self._writer, args=(output_video, 1920, 1080, fps, result_queue, stop_event), daemon=True)
+        reader.start(); writer.start()
 
         frame_count = 0
-        total_start_time = time.time()
-        targets = create_empty_targets(device, [frame_height, frame_width])
-        
-        # Calculate padding to make the image square
-        orig_w, orig_h = frame_width, frame_height
-        transform = get_transform(input_size=input_size, orig_h=orig_h, orig_w=orig_w, device=device)
-        
-        # Initialiser le mode interactif de matplotlib
-        fig_diag, ax_diag = None, None
-        fig_matrix, ax_matrix = plt.subplots(figsize=(8, 6))
+        t_start = time.time()
 
         while True:
-            if self.live_stream:
-                frame = frame_queue.get()
-            else:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+            frame = frame_queue.get()
             if frame is None:
                 break
             frame_count += 1
-            frame_name = input_video + str(frame_count)
-
-            # Preprocess frame
-            t1 = time.time()
-            input_tensor = preprocess_frame(frame, transform, device)
-            if self.use_fp16:
-                input_tensor = input_tensor.half()
-            if frame_count == 1:
-                print(f"GPU {self.gpu_id}: Input tensor is on device: {input_tensor.device}")
-            
-            t2 = time.time()
-
-            # Model inference
-            with torch.no_grad():
-                outputs = self.model(input_tensor, targets)
-            t3 = time.time()
-
-            # Tracking
-                # Get features
-            pad_h = input_size - frame_height
-            pad_w = input_size - frame_width
-            top = pad_h // 2
-            left = pad_w // 2
-            measurements = (frame_height, frame_width, input_size, left, top)
-            
-            detections = self.phalp_tracker.get_human_features(sat_data=outputs, 
-                                                 image=frame, 
-                                                 frame_name=frame_name, 
-                                                 t_=frame_count, 
-                                                 measurments=measurements)
-
-            cam_intrinsics = outputs['pred_intrinsics'][0].reshape(3, 3).detach().cpu()
-
-            # Forward tracking
-            self.phalp_tracker.tracker.predict()
-            self.phalp_tracker.tracker.update(detections, frame_count, frame_name, self.phalp_tracker.cfg.phalp.shot)
-
-            # Pose smoothing (post-processing)
-            # TODO
-
-            detec_tracked_pose = {}
-            hist_tracked_pose = {}
-
-            for tracks_ in self.phalp_tracker.tracker.tracks:
-                if not tracks_.is_confirmed(): 
-                    continue
-                if tracks_.time_since_update >= 5: 
-                    continue
-
-                track_id = tracks_.track_id
-
-                track_data_detec = tracks_.track_data['history'][-1]
-                detec_tracked_pose[track_id] = track_data_detec['3d_joints']
-                if frame_count > 3:
-                    track_data_hist = tracks_.track_data['history'][-3]
-                    hist_tracked_pose[track_id] = track_data_hist['3d_joints']
-
-                """
-                pred_cam_xys = track_data_hist['pred_cam_xys']
-                pred_intrinsic = track_data_hist['pred_intrinsic']
-                track_data_pred = np.asarray(tracks_.track_data['prediction']['pose'][-1])
-                smpl_param = pose_camera_vector_to_smpl(track_data_pred)
-                pred_pose, pred_shape = smpl_to_pred_pose_shape(smpl_param)
-
-                # Store 3D joints in tracked_pose[track_id] instead of overwriting tracked_pose
-                pred_tracked_pose[track_id] = self.model.process_smpl_single(
-                    pose=pred_pose,
-                    shape=pred_shape,
-                    cam_xys=pred_cam_xys,
-                    cam_intrinsics=pred_intrinsic,
-                    device=device
-                )"""
-            
-            t4 = time.time()
-
-            frame_with_poses = vis_vertices_img_with_tracked_pose(frame, detec_tracked_pose, cam_intrinsics, (frame_width, frame_height), self.phalp_tracker.color_dict)
-            
-            # Compute persistence diagrams using tracked_pose
-
-            diagrams_hist_dict = compute_persistence_diagrams(hist_tracked_pose)
-            diagrams_detec_dict = compute_persistence_diagrams(detec_tracked_pose)
-
-            cross_distance_matrix = compute_cross_distance_matrix(list(diagrams_hist_dict.values()),
-                                                                  list(diagrams_detec_dict.values()),
-                                                                  epsilon=0.0)
-            heatmap_image = generate_heatmap_image(cross_distance_matrix,
-                                           list(diagrams_hist_dict.keys()),
-                                           list(diagrams_detec_dict.keys()))
-            diagram_image = generate_persistence_diagram_image(diagrams_detec_dict, self.phalp_tracker.color_dict)
-            #visualize_distance_matrix(cross_distance_matrix, diagrams_hist_dict.keys(), diagrams_detec_dict.keys())
-            """if len(diagrams)>0:  # Check if diagrams is non-empty
-                fig_diag, ax_diag = display_persistence_diagrams(diagrams, self.phalp_tracker.color_dict, diagrams_id, fig_diag, ax_diag)
-            else:
-                if fig_diag is not None:
-                    ax_diag.clear()
-                    ax_diag.set_title(f'Diagrammes de Persistance(Aucun humain)')
-                    fig_diag.canvas.draw()
-                    fig_diag.canvas.flush_events()"""
-
-            # Process outputs
-            confs = outputs['pred_confs'][0].view(-1)
-            valid_mask = confs > conf_thresh
-            
-            if valid_mask.any():
-                valid_verts_list = [outputs['pred_verts'][0, i].detach().cpu().numpy() for i in range(len(confs)) if valid_mask[i]]
-                rendered_img = vis_vertices_img(frame_with_poses, valid_verts_list, cam_intrinsics, (frame_width, frame_height))
-
-            else:
-                rendered_img = frame
-
-            rendered_img = add_left_border_to_frame(rendered_img, 500, (1,1,1))
-            frame_with_heatmap, heatmap_height = overlay_heatmap_on_frame(
-                rendered_img, 
-                heatmap_image, 
-                position=(10, 10), 
-                alpha=0.7, 
-                brightness_factor=1.5, 
-                size_factor=1.5
-            )
-
-            # Superposer les diagrammes juste en dessous de la heatmap
-            final_frame = overlay_diagram_on_frame(
-                frame_with_heatmap, 
-                diagram_image, 
-                position=(10, 10), 
-                alpha=0.7, 
-                brightness_factor=1.5, 
-                size_factor=1.5, 
-                heatmap_height=heatmap_height
-            )
-            t5 = time.time()
-
-            # Put result in queue for writing
-            result_queue.put((frame_count, final_frame))
-            t6 = time.time()
-
-            # Display
+            processed = self._process_frame(frame, frame_count, input_size, conf_thresh, display)
+            result_queue.put(processed)
             if display or self.live_stream:
-                cv2.imshow('Inference Output', final_frame)
+                cv2.imshow('Output', processed)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
 
-        # Timing breakdown
-        print(f"\nGPU {self.gpu_id}, Frame {frame_count} Timing Breakdown:")
-        print(f"  Preprocessing: {t2 - t1:.4f} s")
-        print(f"  Model Inference: {t3 - t2:.4f} s")
-        print(f"  Post-processing: {t4 - t3:.4f} s")
-        print(f"  Visualization: {t5 - t4:.4f} s")
-        print(f"  Queue Output: {t6 - t5:.4f} s")
-        print(f"  Total Frame Time: {t6 - t1:.4f} s")
-
-        # Cleanup
+        result_queue.put(None)
+        writer.join()
         stop_event.set()
         cap.release()
-        if not self.live_stream:
-            writer_thread.join()
         cv2.destroyAllWindows()
-        total_time = time.time() - total_start_time
-        print(f"\nMain: Processed {frame_count} frames in {total_time:.2f} seconds ({frame_count/total_time:.2f} FPS)")
+
+        elapsed = time.time() - t_start
+        print(f"Processed {frame_count} frames in {elapsed:.2f}s ({frame_count/elapsed:.2f} FPS)")

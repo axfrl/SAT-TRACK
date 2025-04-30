@@ -26,7 +26,7 @@ class PHALPConfig:
     pose_distance: str = 'smpl'
     distance_type: str = 'EQ_019'
     alpha: float = 0.1
-    low_th_c: float = 0.4
+    low_th_c: float = 0.25
     hungarian_th: float = 100.0
     track_history: int = 7
     max_age_track: int = 50
@@ -125,7 +125,7 @@ class SATHMRConfig:
     infer_batch_size: int = 1
     infer_num_workers: int = 8
     distributed_infer: bool = True
-    conf_thresh: float = 0.4
+    conf_thresh: float = 0.25
     display: bool = False
     live_stream: bool = False
     use_fp16: bool = False
