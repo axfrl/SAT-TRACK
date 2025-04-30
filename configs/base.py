@@ -10,8 +10,8 @@ print("weights_dir", WEIGHTS_DIR)
 
 @dataclass
 class VideoConfig:
-    source: str = '/home/alphafalcon/tracker/code/SAT-TRACK/input'
-    output_dir: str = '/home/alphafalcon/tracker/code/SAT-TRACK/output'
+    source: str = '/home/alphafalcon/Videos/septime/input'
+    output_dir: str = '/home/alphafalcon/Videos/septime/output'
     extract_video: bool = True
     base_path: Optional[str] = None
     start_frame: int = -1
