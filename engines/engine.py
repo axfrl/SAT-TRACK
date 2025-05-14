@@ -9,6 +9,8 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 
+import joblib
+
 from .funcs.video_stream_funcs import get_transform, preprocess_frame, create_empty_targets
 from utils.visualization import (
     vis_vertices_img,
@@ -29,6 +31,9 @@ from utils.utils import pose_camera_vector_to_smpl, smpl_to_pred_pose_shape
 class Engine:
     def __init__(self, args, mode='infer', gpu_id=0):
         self.mode = mode
+        if mode == "eval":
+            self.eval_cfg = args.eval_cfg
+
         self.conf_thresh = args.sathmr.conf_thresh
         self.output_dir = args.video.output_dir
         self.live_stream = args.sathmr.live_stream
@@ -39,7 +44,7 @@ class Engine:
         os.makedirs(self.output_dir, exist_ok=True)
         self._prepare_models(args.sathmr)
         self.phalp_tracker = TrackModel(args, self.device, self.model)
-
+        
     def _set_device(self, gpu_id=0):
         if torch.cuda.is_available() and gpu_id < torch.cuda.device_count():
             return torch.device(f'cuda:{gpu_id}')
@@ -108,7 +113,7 @@ class Engine:
             writer.release()
         print(f"[Writer] Total frames written: {n_frames_written}")
 
-    def _process_frame(self, frame, frame_id, input_size, conf_thresh, display):
+    def _process_frame(self, frame, frame_id, input_size, conf_thresh):
         h, w = frame.shape[:2]
         transform = get_transform(input_size=input_size, orig_h=h, orig_w=w, device=self.device)
         tensor = preprocess_frame(frame, transform, self.device)
@@ -137,13 +142,13 @@ class Engine:
                 continue
             tid = tr.track_id
             history = tr.track_data['history']
-            detec_pose[tid] = history[-1]['3d_joints']
+            #detec_pose[tid] = history[-1]['3d_joints']
             if len(history) > 3:
-                hist_pose[tid] = history[-3]['3d_joints']
+                hist_pose[tid] = history[-2]['3d_joints']
 
         diag_hist = compute_persistence_diagrams(hist_pose)
         diag_detec = compute_persistence_diagrams(detec_pose)
-        dist_mat = compute_cross_distance_matrix(list(diag_hist.values()), list(diag_detec.values()), epsilon=0.0)
+        dist_mat = compute_cross_distance_matrix(list(diag_hist.values()), list(diag_detec.values()), epsilon=0.05)
 
         heatmap = generate_heatmap_image(dist_mat, list(diag_hist.keys()), list(diag_detec.keys()))
         diagram_img = generate_persistence_diagram_image(diag_detec, self.phalp_tracker.color_dict)
@@ -159,7 +164,7 @@ class Engine:
         final = overlay_diagram_on_frame(frame, diagram_img, position=(10,10), alpha=0.7, brightness_factor=1.5, size_factor=1.5, heatmap_height=hmap_h)
         return final
 
-    def infer_video(self, input_video, output_video, input_size, conf_thresh, display=False):
+    def infer_video(self, input_video, output_video, input_size, conf_thresh):
         cap = cv2.VideoCapture(input_video)
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video {input_video}")
@@ -186,9 +191,9 @@ class Engine:
             if frame is None:
                 break
             frame_count += 1
-            processed = self._process_frame(frame, frame_count, input_size, conf_thresh, display)
+            processed = self._process_frame(frame, frame_count, input_size, conf_thresh)
             result_queue.put(processed)
-            if display or self.live_stream:
+            if self.live_stream:
                 cv2.imshow('Output', processed)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
@@ -201,3 +206,38 @@ class Engine:
 
         elapsed = time.time() - t_start
         print(f"Processed {frame_count} frames in {elapsed:.2f}s ({frame_count/elapsed:.2f} FPS)")
+
+        if self.mode == "eval":
+            videos = np.load(self.dataset_dir)
+
+            base_path = '_DATA/posetrack_2018/images/val/'
+
+            os.makedirs(self.eval_cfg.results_dir, exist_ok=True)
+
+            for video_name in videos:
+                print(f"[INFO] Evaluating video {video_name}")
+                video_path = os.path.join(base_path, video_name)
+                image_files = sorted([
+                    os.path.join(video_path, f) for f in os.listdir(video_path)
+                    if f.endswith(('.jpg', '.png'))
+                ])
+
+                video_results = {}  # format attendu par evaluate_trackers
+
+                for frame_id, img_path in enumerate(image_files):
+                    frame = cv2.imread(img_path)
+                    if frame is None:
+                        print(f"[Warning] Could not read frame {img_path}, skipping.")
+                        continue
+
+                    # ATTENTION : _process_frame doit retourner (ids, features)
+                    ids, features = self._process_frame(
+                        frame, frame_id + 1, input_size, conf_thresh, display=False, return_dict=True
+                    )
+
+                    video_results[str(frame_id + 1).zfill(6)] = [ids, features]  # frame_id sous forme de string comme '000001'
+
+                # Sauvegarde dans results_dir/video_name.pkl
+                out_path = os.path.join(self.eval_cfg.results_dir, f"{video_name}.pkl")
+                joblib.dump(video_results, out_path)
+                print(f"[INFO] Saved predictions to {out_path}")

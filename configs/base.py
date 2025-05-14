@@ -26,7 +26,7 @@ class PHALPConfig:
     pose_distance: str = 'smpl'
     distance_type: str = 'EQ_019'
     alpha: float = 0.1
-    low_th_c: float = 0.25
+    low_th_c: float = 0.23
     hungarian_th: float = 100.0
     track_history: int = 7
     max_age_track: int = 50
@@ -119,13 +119,18 @@ class ExtraConfig:
     FOCAL_LENGTH: int = 5000
 
 @dataclass
+class EvalConfig:
+    dataset_dir: str = "path/to/video/track/dataset"                                    # !!!!!!!!!!!!! NOT SET !!!!!!!!!!!!!!
+    result_dir: str = "/home/alphafalcon/tracker/code/SAT-TRACK/eval"
+
+@dataclass
 class SATHMRConfig:
     pretrain: bool = True
     pretrain_path: str = f"{WEIGHTS_DIR}/sat_hmr/sat_644.pth"
     infer_batch_size: int = 1
     infer_num_workers: int = 8
     distributed_infer: bool = True
-    conf_thresh: float = 0.25
+    conf_thresh: float = 0.23
     display: bool = False
     live_stream: bool = False
     use_fp16: bool = False
@@ -166,6 +171,7 @@ class FullConfig:
     track_dataset: str = "demo"
     device: str = "cuda"
     base_tracker: str = "PHALP"
+    eval_cfg: EvalConfig = field(default_factory=EvalConfig)
     train: bool = False
     debug: bool = False
     use_gt: bool = False
