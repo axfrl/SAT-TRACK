@@ -252,56 +252,56 @@ def render_mesh(height, width, meshes, face, cam_intrinsics, colors = None):
     renderer.delete()
     return rgb, depth
 
-RADIUS_VERT = 1
-KERNEL_VERT = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*RADIUS_VERT+1, 2*RADIUS_VERT+1))
-
 RADIUS_JOINT = 5
 KERNEL_JOINT = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*RADIUS_JOINT+1, 2*RADIUS_JOINT+1))
 
-def vis_vertices_img(frame, verts_cam_list, cam_intrinsics, frame_size):
+RADIUS_VERT = 1
+KERNEL_VERT = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * RADIUS_VERT + 1, 2 * RADIUS_VERT + 1))
+
+def vis_vertices_img(frame, all_verts, cam_intrinsics, frame_size):
     ORIG_W, ORIG_H = frame_size
     PADDED_H = ORIG_W
     PAD_TOP = (PADDED_H - ORIG_H) // 2
-    input_size = 1288  # taille d'entrée du modèle
+    input_size = 1288  # Taille d'entrée du modèle
     SCALE_FACTOR = input_size / PADDED_H
     EXPECTED_CY = input_size / 2
     N_SAMPLES = 100000
 
     frame_h, frame_w = frame.shape[:2]
 
-    # 1) concat tous les points en numpy directement 
-    all_verts = np.vstack([
-        v.squeeze(0) if v.ndim == 3 else v
-        for v in verts_cam_list
-    ]).astype(np.float32)  # (N,3)
+    # Vérification si aucun vertex
+    if all_verts.shape[0] == 0:
+        return frame
 
+    # Échantillonnage si trop de points
     if all_verts.shape[0] > N_SAMPLES:
         idx = np.random.choice(all_verts.shape[0], N_SAMPLES, replace=False)
         all_verts = all_verts[idx]
-    # 2) projection homogène en numpy
-    K = cam_intrinsics.cpu().numpy().astype(np.float32)
-    verts_homo = all_verts @ K.T                # (N,3)
-    pts2d = verts_homo[:, :2] / (verts_homo[:, 2:] + 1e-6)  # (N,2)
 
-    # 3) ajustement de l’offset en y
-    predicted_cy = K[1,2]
+    # Projection homogène en NumPy
+    K = cam_intrinsics.cpu().numpy().astype(np.float32)
+    verts_homo = all_verts @ K.T  # (N, 3)
+    pts2d = verts_homo[:, :2] / (verts_homo[:, 2:] + 1e-6)  # (N, 2)
+
+    # Ajustement de l’offset en y
+    predicted_cy = K[1, 2]
     cy_offset = (EXPECTED_CY - predicted_cy) * (frame_h / (input_size - 2 * PAD_TOP * SCALE_FACTOR))
 
-    # 4) passage à l’échelle vers la taille de la frame
-    xs = pts2d[:,0] * (frame_w / input_size)
-    ys = (pts2d[:,1] - PAD_TOP * SCALE_FACTOR) * (frame_h / (input_size - 2 * PAD_TOP * SCALE_FACTOR))
+    # Passage à l’échelle vers la taille de la frame
+    xs = pts2d[:, 0] * (frame_w / input_size)
+    ys = (pts2d[:, 1] - PAD_TOP * SCALE_FACTOR) * (frame_h / (input_size - 2 * PAD_TOP * SCALE_FACTOR))
     ys += cy_offset
 
-    # 5) clipping et entiers
+    # Clipping et conversion en entiers
     ix = np.clip(xs, 0, frame_w - 1).astype(np.int32)
     iy = np.clip(ys, 0, frame_h - 1).astype(np.int32)
 
-    # 6) masque binaire + dilatation pour faire des “cercles”
+    # Masque binaire + dilatation pour faire des cercles
     mask = np.zeros((frame_h, frame_w), np.uint8)
     mask[iy, ix] = 255
     mask = cv2.dilate(mask, KERNEL_VERT, iterations=1)
 
-    # 7) application du rendu vert
+    # Application du rendu vert
     frame[mask == 255] = (0, 255, 0)
     return frame
 

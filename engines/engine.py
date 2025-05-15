@@ -29,11 +29,12 @@ from topology.persistence_analysis import (
 from utils.utils import pose_camera_vector_to_smpl, smpl_to_pred_pose_shape
 
 class Engine:
-    def __init__(self, args, mode='infer', gpu_id=0):
+    def __init__(self, args, mode='infer', gpu_id=1):
         self.mode = mode
         if mode == "eval":
             self.eval_cfg = args.eval_cfg
 
+        self.tracker_on = args.tracker_on
         self.conf_thresh = args.sathmr.conf_thresh
         self.output_dir = args.video.output_dir
         self.live_stream = args.sathmr.live_stream
@@ -115,54 +116,79 @@ class Engine:
 
     def _process_frame(self, frame, frame_id, input_size, conf_thresh):
         h, w = frame.shape[:2]
-        transform = get_transform(input_size=input_size, orig_h=h, orig_w=w, device=self.device)
-        tensor = preprocess_frame(frame, transform, self.device)
+        timers = {}
+
+        start_pre = time.time()
+        tensor = preprocess_frame(frame, input_size, self.device)
         if self.use_fp16:
             tensor = tensor.half()
+        timers['preprocess'] = time.time() - start_pre
 
+        start_inf = time.time()
         with torch.no_grad():
-            outputs = self.model(tensor, create_empty_targets(self.device, [h, w]))
+            with torch.amp.autocast(device_type="cuda"):
+                outputs = self.model(tensor, create_empty_targets(self.device, [h, w]))
+        timers['inference'] = time.time() - start_inf
 
+        start_post = time.time()
         pad_h, pad_w = input_size - h, input_size - w
         left, top = pad_w // 2, pad_h // 2
-        dets = self.phalp_tracker.get_human_features(
-            sat_data=outputs,
-            image=frame,
-            frame_name=str(frame_id),
-            t_=frame_id,
-            measurments=(h, w, input_size, left, top)
-        )
+
         K = outputs['pred_intrinsics'][0].reshape(3,3).detach().cpu()
-        self.phalp_tracker.tracker.predict()
-        self.phalp_tracker.tracker.update(dets, frame_id, str(frame_id), self.phalp_tracker.cfg.phalp.shot)
 
-        detec_pose, hist_pose = {}, {}
-        for tr in self.phalp_tracker.tracker.tracks:
-            if not tr.is_confirmed() or tr.time_since_update >= 5:
-                continue
-            tid = tr.track_id
-            history = tr.track_data['history']
-            #detec_pose[tid] = history[-1]['3d_joints']
-            if len(history) > 3:
-                hist_pose[tid] = history[-2]['3d_joints']
+        if self.tracker_on:
+            dets = self.phalp_tracker.get_human_features(
+                sat_data=outputs,
+                image=frame,
+                frame_name=str(frame_id),
+                t_=frame_id,
+                measurments=(h, w, input_size, left, top)
+            )
 
-        diag_hist = compute_persistence_diagrams(hist_pose)
-        diag_detec = compute_persistence_diagrams(detec_pose)
-        dist_mat = compute_cross_distance_matrix(list(diag_hist.values()), list(diag_detec.values()), epsilon=0.05)
+            self.phalp_tracker.tracker.predict()
+            self.phalp_tracker.tracker.update(dets, frame_id, str(frame_id), self.phalp_tracker.cfg.phalp.shot)
 
-        heatmap = generate_heatmap_image(dist_mat, list(diag_hist.keys()), list(diag_detec.keys()))
-        diagram_img = generate_persistence_diagram_image(diag_detec, self.phalp_tracker.color_dict)
+            detec_pose, hist_pose = {}, {}
+            for tr in self.phalp_tracker.tracker.tracks:
+                if not tr.is_confirmed() or tr.time_since_update >= 5:
+                    continue
+                tid = tr.track_id
+                history = tr.track_data['history']
+                if len(history) > 3:
+                    hist_pose[tid] = history[-2]['3d_joints']
+
+            diag_hist = compute_persistence_diagrams(hist_pose)
+            diag_detec = compute_persistence_diagrams(detec_pose)
+            dist_mat = compute_cross_distance_matrix(list(diag_hist.values()), list(diag_detec.values()), epsilon=0.05)
+
+            heatmap = generate_heatmap_image(dist_mat, list(diag_hist.keys()), list(diag_detec.keys()))
+            diagram_img = generate_persistence_diagram_image(diag_detec, self.phalp_tracker.color_dict)
 
         confs = outputs['pred_confs'][0].view(-1)
+        
         if (mask := confs > conf_thresh).any():
-            verts = [outputs['pred_verts'][0,i].cpu().numpy() for i,v in enumerate(confs) if mask[i]]
-            frame = vis_vertices_img(frame, verts, K, (w, h))
-            frame = vis_vertices_img_with_tracked_pose(frame, detec_pose, K, (w,h), self.phalp_tracker.color_dict)
+            verts_selected = outputs['pred_verts'][:, mask]  # Forme : (1, num_true, num_vertices, 3)
 
-        frame = add_left_border_to_frame(frame, 500, (1,1,1))
-        frame, hmap_h = overlay_heatmap_on_frame(frame, heatmap, position=(10,10), alpha=0.7, brightness_factor=1.5, size_factor=1.5)
-        final = overlay_diagram_on_frame(frame, diagram_img, position=(10,10), alpha=0.7, brightness_factor=1.5, size_factor=1.5, heatmap_height=hmap_h)
-        return final
+            if verts_selected.shape[1] > 0:  # Vérifier si des vertices sont sélectionnés
+                verts_all = verts_selected.reshape(-1, 3)  # Forme : (num_true * num_vertices, 3)
+                verts_all_cpu = verts_all.cpu().numpy()    # Transfert unique GPU -> CPU
+            else:
+                verts_all_cpu = np.empty((0, 3), dtype=np.float32)  # Cas où aucun vertex n'est sélectionné
+
+            # Appel de la fonction optimisée
+            frame = vis_vertices_img(frame, verts_all_cpu, K, (w, h))
+
+            if self.tracker_on:
+                frame = vis_vertices_img_with_tracked_pose(frame, detec_pose, K, (w,h), self.phalp_tracker.color_dict)
+
+        timers['postprocess'] = time.time() - start_post
+
+        total_time = sum(timers.values())
+        for k, v in timers.items():
+            print(f"[Timing] {k}: {v*1000:.2f} ms ({v/total_time*100:.1f}% of total)")
+        print(f"[Timing] Total: {total_time*1000:.2f} ms\n")
+
+        return frame
 
     def infer_video(self, input_video, output_video, input_size, conf_thresh):
         cap = cv2.VideoCapture(input_video)
@@ -193,6 +219,7 @@ class Engine:
             frame_count += 1
             processed = self._process_frame(frame, frame_count, input_size, conf_thresh)
             result_queue.put(processed)
+
             if self.live_stream:
                 cv2.imshow('Output', processed)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -207,37 +234,37 @@ class Engine:
         elapsed = time.time() - t_start
         print(f"Processed {frame_count} frames in {elapsed:.2f}s ({frame_count/elapsed:.2f} FPS)")
 
-        if self.mode == "eval":
-            videos = np.load(self.dataset_dir)
+    def eval(self, input_size, conf_thresh):
+        videos = np.load(self.dataset_dir)
 
-            base_path = '_DATA/posetrack_2018/images/val/'
+        base_path = '_DATA/posetrack_2018/images/val/'
 
-            os.makedirs(self.eval_cfg.results_dir, exist_ok=True)
+        os.makedirs(self.eval_cfg.results_dir, exist_ok=True)
 
-            for video_name in videos:
-                print(f"[INFO] Evaluating video {video_name}")
-                video_path = os.path.join(base_path, video_name)
-                image_files = sorted([
-                    os.path.join(video_path, f) for f in os.listdir(video_path)
-                    if f.endswith(('.jpg', '.png'))
-                ])
+        for video_name in videos:
+            print(f"[INFO] Evaluating video {video_name}")
+            video_path = os.path.join(base_path, video_name)
+            image_files = sorted([
+                os.path.join(video_path, f) for f in os.listdir(video_path)
+                if f.endswith(('.jpg', '.png'))
+            ])
 
-                video_results = {}  # format attendu par evaluate_trackers
+            video_results = {}  # format attendu par evaluate_trackers
 
-                for frame_id, img_path in enumerate(image_files):
-                    frame = cv2.imread(img_path)
-                    if frame is None:
-                        print(f"[Warning] Could not read frame {img_path}, skipping.")
-                        continue
+            for frame_id, img_path in enumerate(image_files):
+                frame = cv2.imread(img_path)
+                if frame is None:
+                    print(f"[Warning] Could not read frame {img_path}, skipping.")
+                    continue
 
-                    # ATTENTION : _process_frame doit retourner (ids, features)
-                    ids, features = self._process_frame(
-                        frame, frame_id + 1, input_size, conf_thresh, display=False, return_dict=True
-                    )
+                # ATTENTION : _process_frame doit retourner (ids, features)
+                ids, features = self._process_frame(
+                    frame, frame_id + 1, input_size, conf_thresh, display=False, return_dict=True
+                )
 
-                    video_results[str(frame_id + 1).zfill(6)] = [ids, features]  # frame_id sous forme de string comme '000001'
+                video_results[str(frame_id + 1).zfill(6)] = [ids, features]  # frame_id sous forme de string comme '000001'
 
-                # Sauvegarde dans results_dir/video_name.pkl
-                out_path = os.path.join(self.eval_cfg.results_dir, f"{video_name}.pkl")
-                joblib.dump(video_results, out_path)
-                print(f"[INFO] Saved predictions to {out_path}")
+            # Sauvegarde dans results_dir/video_name.pkl
+            out_path = os.path.join(self.eval_cfg.results_dir, f"{video_name}.pkl")
+            joblib.dump(video_results, out_path)
+            print(f"[INFO] Saved predictions to {out_path}")

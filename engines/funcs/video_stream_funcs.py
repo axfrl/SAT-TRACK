@@ -53,23 +53,34 @@ def create_empty_targets(device, img_size):
         'img_size': torch.tensor(img_size, device=device)
     }]
 
-def preprocess_frame(frame, transform, device, orig_w=1280, orig_h=720):
-    """
-    Preprocess a video frame on the GPU by padding to square and resizing to model input size.
+@torch.no_grad()
+def preprocess_frame(frame, input_size, device):
+    # Convert to tensor and normalize in one go
+    frame_tensor = torch.from_numpy(frame).to(device=device, dtype=torch.float32).permute(2, 0, 1) / 255.0  # (3, H, W)
     
-    Args:
-        frame: Input frame (numpy array, HxWx3, BGR)
-        transform: Torchvision transform pipeline (GPU-compatible)
-        device: Target device (e.g., 'cuda:0')
-        orig_w: Original frame width (default: 1280)
-        orig_h: Original frame height (default: 720)
-    Returns:
-        tensor: Preprocessed frame (torch tensor, 1x3xinput_sizexinput_size)
-    """
-    frame_tensor = torch.from_numpy(frame).to(device).permute(2, 0, 1)
-    frame_tensor = frame_tensor.flip(0)  # BGR to RGB
-    frame_tensor = frame_tensor.float() / 255.0
-    return transform(frame_tensor).unsqueeze(0)
+    # Convert BGR to RGB directly with slicing
+    frame_tensor = frame_tensor.flip(0)  # Faster than indexing [2,1,0]
+    
+    # Get original dimensions
+    _, h, w = frame_tensor.shape
+
+    # Padding to square (height < width)
+    if h < w:
+        pad_h = w - h
+        frame_tensor = F.pad(frame_tensor, (0, 0, pad_h // 2, pad_h - pad_h // 2), value=0)
+    elif w < h:
+        pad_w = h - w
+        frame_tensor = F.pad(frame_tensor, (pad_w // 2, pad_w - pad_w // 2, 0, 0), value=0)
+    
+    # Resize with anti-aliasing if supported
+    frame_tensor = F.interpolate(frame_tensor.unsqueeze(0), size=(input_size, input_size), mode='bilinear', align_corners=False)
+
+    # Normalize in-place
+    mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+    frame_tensor.sub_(mean).div_(std)
+
+    return frame_tensor  # shape: (1, 3, input_size, input_size)
 
 def find_input_video(input_dir):
     """Find a single video file."""

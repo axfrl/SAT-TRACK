@@ -22,7 +22,7 @@ def main(cfg: DictConfig):
 
     # Initialize and run the engine with SAT-HMR configuration
     engine = Engine(cfg, mode=cfg.sathmr.mode, gpu_id=cfg.sathmr.gpu_id)
-    engine.infer_video(input_video, output_video, cfg.sathmr.input_size, cfg.sathmr.conf_thresh, cfg.sathmr.display)
+    engine.infer_video(input_video, output_video, cfg.sathmr.input_size, cfg.sathmr.conf_thresh)
 
 if __name__ == "__main__":
     main()

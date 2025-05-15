@@ -132,7 +132,7 @@ class SATHMRConfig:
     distributed_infer: bool = True
     conf_thresh: float = 0.23
     display: bool = False
-    live_stream: bool = False
+    live_stream: bool = True
     use_fp16: bool = False
     render_mode: str = 'points'
     input_size: int = 1288
@@ -146,8 +146,8 @@ class SATHMRConfig:
     transformer_activation: str = "relu"
     sat_cfg: Dict = field(default_factory=lambda: {
         'use_sat': True,
-        'share_patch_embed': False,
-        'preprocess_pos_embed': False,
+        'share_patch_embed': True,
+        'preprocess_pos_embed': True,
         'num_lvls': 3,
         'lvl_embed': True,
         'get_map_layer': 3,
@@ -171,6 +171,7 @@ class FullConfig:
     track_dataset: str = "demo"
     device: str = "cuda"
     base_tracker: str = "PHALP"
+    tracker_on: bool = False
     eval_cfg: EvalConfig = field(default_factory=EvalConfig)
     train: bool = False
     debug: bool = False

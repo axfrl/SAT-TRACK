@@ -45,7 +45,7 @@ class Model(nn.Module):
                     sat_cfg = {'use_sat': False},
                     dn_cfg = {'use_dn': False},
                     train_pos_embed = True,
-                    aux_loss=True, 
+                    aux_loss=False, 
                     iter_update=True,
                     query_dim=4, 
                     bbox_embed_diff_each_layer=True,
@@ -579,66 +579,91 @@ class Model(nn.Module):
     
     def forward(self, samples: NestedTensor, targets, sat_use_gt = False, detach_j3ds = False):
         """ The forward expects a NestedTensor, which consists of:
-               - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
-               - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
+            - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
+            - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
 
             It returns a dict with the following elements:
-               - "pred_logits": the classification logits (including no-object) for all queries.
+            - "pred_logits": the classification logits (including no-object) for all queries.
                                 Shape= [batch_size x num_queries x num_classes]
-               - "pred_boxes": The normalized boxes coordinates for all queries, represented as
-                               (center_x, center_y, width, height). These values are normalized in [0, 1],
-                               relative to the size of each individual image (disregarding possible padding).
-                               See PostProcess for information on how to retrieve the unnormalized bounding box.
-               - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
+            - "pred_boxes": The normalized boxes coordinates for all queries, represented as
+                            (center_x, center_y, width, height). These values are normalized in [0, 1],
+                            relative to the size of each individual image (disregarding possible padding).
+                            See PostProcess for information on how to retrieve the unnormalized bounding box.
+            - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
                                 dictionnaries containing the two above keys for each decoder layer.
         """
-
         assert isinstance(samples, (list, torch.Tensor))
+        
+        # Dictionary to store timing results
+        timers = {}
 
+        # Start total time
+        start_total = time.time()
+
+        # Preprocessing position embeddings
+        start_preprocess = time.time()
         if self.training:
             self.preprocessed_pos_lvl1 = None
-
         elif self.preprocessed_pos_lvl1 is None and self.use_sat:
-            self.preprocessed_pos_lvl1 = F.interpolate(self.encoder_pos_embeds.unsqueeze(0).permute(0, 3, 1, 2),
-                                            mode="bicubic",
-                                            antialias=self.encoder.interpolate_antialias,
-                                            size = (int(self.feature_size[1]),int(self.feature_size[1]))).squeeze(0).permute(1,2,0)
+            self.preprocessed_pos_lvl1 = F.interpolate(
+                self.encoder_pos_embeds.unsqueeze(0).permute(0, 3, 1, 2),
+                mode="bicubic",
+                antialias=self.encoder.interpolate_antialias,
+                size=(int(self.feature_size[1]), int(self.feature_size[1]))
+            ).squeeze(0).permute(1, 2, 0)
+        timers['preprocess_pos_embeds'] = time.time() - start_preprocess
 
-
+        # Camera intrinsics
+        start_cam = time.time()
         bs = len(targets)
+        img_size = torch.stack([t['img_size'].flip(0) for t in targets]).to('cuda')
+        valid_ratio = img_size / self.input_size
+        cam_intrinsics = self.cam_intrinsics.repeat(bs, 1, 1, 1).to('cuda')
+        cam_intrinsics[..., :2, 2] = cam_intrinsics[..., :2, 2] * valid_ratio[:, None, :]
+        timers['cam_intrinsics'] = time.time() - start_cam
 
-        # get cam_intrinsics
-        img_size = torch.stack([t['img_size'].flip(0) for t in targets])
-        valid_ratio = img_size/self.input_size
+        # Encoder
+        start_encoder = time.time()
+        final_features, pos_embeds, token_lens, scale_map_dict, sat_dict = self.forward_encoder(
+            samples, targets, use_gt=sat_use_gt
+        )
+        timers['encoder'] = time.time() - start_encoder
+
+        # Initialize embeddings
+        start_init_embeds = time.time()
+        embedweight = self.refpoint_embed.weight.unsqueeze(0).repeat(bs, 1, 1)
+        tgt = self.tgt_embed.weight.unsqueeze(0).repeat(bs, 1, 1)
         
-        cam_intrinsics = self.cam_intrinsics.repeat(bs, 1, 1, 1)
-        cam_intrinsics[...,:2,2] = cam_intrinsics[...,:2,2] * valid_ratio[:, None, :]
-
-
-        final_features, pos_embeds, token_lens, scale_map_dict, sat_dict\
-             = self.forward_encoder(samples, targets, use_gt = sat_use_gt)
-
-        # default dab-detr pipeline
-        embedweight = (self.refpoint_embed.weight).unsqueeze(0).repeat(bs,1,1)
-        tgt = (self.tgt_embed.weight).unsqueeze(0).repeat(bs,1,1)
-
         if self.training and self.use_dn:
-            input_query_tgt, input_query_bbox, attn_mask, dn_meta =\
-                            prepare_for_cdn(targets = targets, dn_cfg = self.dn_cfg, 
-                                        num_queries = self.num_queries, hidden_dim = self.hidden_dim, dn_enc = self.dn_enc)
+            input_query_tgt, input_query_bbox, attn_mask, dn_meta = prepare_for_cdn(
+                targets=targets, 
+                dn_cfg=self.dn_cfg,
+                num_queries=self.num_queries, 
+                hidden_dim=self.hidden_dim, 
+                dn_enc=self.dn_enc
+            )
             tgt = torch.cat([input_query_tgt, tgt], dim=1)
             embedweight = torch.cat([input_query_bbox, embedweight], dim=1)
         else:
             attn_mask = None
+        tgt_lens = [tgt.shape[1]] * bs
+        timers['init_embeddings'] = time.time() - start_init_embeds
 
-        tgt_lens = [tgt.shape[1]]*bs
+        # Decoder
+        start_decoder = time.time()
+        hs, reference = self.decoder(
+            memory=final_features, 
+            memory_lens=token_lens,
+            tgt=tgt.flatten(0, 1), 
+            tgt_lens=tgt_lens,
+            refpoint_embed=embedweight.flatten(0, 1),
+            pos_embed=pos_embeds,
+            self_attn_mask=attn_mask
+        )
+        timers['decoder'] = time.time() - start_decoder
 
-        hs, reference = self.decoder(memory=final_features, memory_lens=token_lens,
-                                         tgt=tgt.flatten(0,1), tgt_lens=tgt_lens,
-                                         refpoint_embed=embedweight.flatten(0,1),
-                                         pos_embed=pos_embeds,
-                                         self_attn_mask = attn_mask)
-        
+        # Box prediction
+        start_box_pred = time.time()
         reference_before_sigmoid = inverse_sigmoid(reference)
         outputs_coords = []
         for lvl in range(hs.shape[0]):
@@ -647,48 +672,92 @@ class Model(nn.Module):
             outputs_coord = tmp.sigmoid()
             outputs_coords.append(outputs_coord)
         pred_boxes = torch.stack(outputs_coords)
+        timers['box_prediction'] = time.time() - start_box_pred
 
+        # Initialize outputs
         outputs_poses = []
         outputs_shapes = []
         outputs_confs = []
         outputs_j3ds = []
         outputs_j2ds = []
         outputs_depths = []
-
-        # shape of hs: (lvl, bs, num_queries, dim)
         outputs_pose_6d = self.mean_pose.view(1, 1, -1)
         outputs_shape = self.mean_shape.view(1, 1, -1)
-
         pred_cam_xys = []
-        for lvl in range(hs.shape[0]):
 
-            outputs_pose_6d = outputs_pose_6d + self.pose_head[lvl](hs[lvl])
-            outputs_shape = outputs_shape + self.shape_head[lvl](hs[lvl])
+        # Head processing
+        start_head = time.time()
 
-            if self.training or lvl == hs.shape[0] - 1:
+        if self.training:
+            for lvl in range(hs.shape[0]):
+                outputs_pose_6d = outputs_pose_6d + self.pose_head[lvl](hs[lvl])
+                outputs_shape = outputs_shape + self.shape_head[lvl](hs[lvl])
+
+                start_rotat = time.time()
                 outputs_pose = rot6d_to_axis_angle(outputs_pose_6d)
-
                 outputs_conf = self.conf_head(hs[lvl]).sigmoid()
-
-                # cam
                 cam_xys = self.cam_head(hs[lvl])
+
+                timers['camera_processing'] = time.time() - start_rotat
                 pred_cam_xys.append(cam_xys)
 
-                outputs_vert, outputs_j3d, outputs_j2d, depth, transl\
-                = self.process_smpl(poses = outputs_pose,
-                                    shapes = outputs_shape,
-                                    cam_xys = cam_xys,
-                                    cam_intrinsics = cam_intrinsics,
-                                    detach_j3ds = detach_j3ds)
-                
+                # SMPL processing
+                start_smpl = time.time()
+                outputs_vert, outputs_j3d, outputs_j2d, depth, transl = self.process_smpl(
+                    poses=outputs_pose,
+                    shapes=outputs_shape,
+                    cam_xys=cam_xys,
+                    cam_intrinsics=cam_intrinsics,
+                    detach_j3ds=detach_j3ds
+                )
+                timers[f'smpl_level_{lvl}'] = time.time() - start_smpl
+
                 outputs_poses.append(outputs_pose)
                 outputs_shapes.append(outputs_shape)
                 outputs_confs.append(outputs_conf)
-                # outputs_verts.append(outputs_vert)
                 outputs_j3ds.append(outputs_j3d)
                 outputs_j2ds.append(outputs_j2d)
                 outputs_depths.append(depth)
-        
+
+        else:
+            # Compute outputs for all levels in parallel using list comprehension and torch.stack
+            pose_outputs = torch.stack([self.pose_head[lvl](hs[lvl]) for lvl in range(hs.shape[0])])
+            shape_outputs = torch.stack([self.shape_head[lvl](hs[lvl]) for lvl in range(hs.shape[0])])
+
+            # Sum across levels (dim=0) to get final outputs
+            outputs_pose_6d = torch.sum(pose_outputs, dim=0)
+            outputs_shape = torch.sum(shape_outputs, dim=0)
+            lvl = hs.shape[0] - 1
+            start_rotat = time.time()
+            outputs_pose = rot6d_to_axis_angle(outputs_pose_6d)
+            outputs_conf = self.conf_head(hs[lvl]).sigmoid()
+            cam_xys = self.cam_head(hs[lvl])
+
+            timers['camera_processing'] = time.time() - start_rotat
+            pred_cam_xys.append(cam_xys)
+
+            # SMPL processing
+            start_smpl = time.time()
+            outputs_vert, outputs_j3d, outputs_j2d, depth, transl = self.process_smpl(
+                poses=outputs_pose,
+                shapes=outputs_shape,
+                cam_xys=cam_xys,
+                cam_intrinsics=cam_intrinsics,
+                detach_j3ds=detach_j3ds
+            )
+            timers[f'smpl_level_{lvl}'] = time.time() - start_smpl
+
+            outputs_poses.append(outputs_pose)
+            outputs_shapes.append(outputs_shape)
+            outputs_confs.append(outputs_conf)
+            outputs_j3ds.append(outputs_j3d)
+            outputs_j2ds.append(outputs_j2d)
+            outputs_depths.append(depth)
+            
+        timers['head_processing'] = time.time() - start_head
+
+        # Stack outputs
+        start_stack = time.time()
         pred_poses = torch.stack(outputs_poses)
         pred_betas = torch.stack(outputs_shapes)
         pred_confs = torch.stack(outputs_confs)
@@ -698,40 +767,56 @@ class Model(nn.Module):
         pred_j3ds = torch.stack(outputs_j3ds)
         pred_j2ds = torch.stack(outputs_j2ds)
         pred_depths = torch.stack(outputs_depths)
+        timers['stack_outputs'] = time.time() - start_stack
 
+        # Post-processing
+        start_post = time.time()
+        if self.training and self.use_dn:
+            pred_poses, pred_betas, pred_boxes, pred_confs, pred_j3ds, pred_j2ds, pred_depths, pred_verts, pred_transl = \
+                dn_post_process(
+                    pred_poses, pred_betas, pred_boxes, pred_confs,
+                    pred_j3ds, pred_j2ds, pred_depths, pred_verts, pred_transl,
+                    dn_meta, self.aux_loss, self._set_aux_loss
+                )
+        timers['post_processing'] = time.time() - start_post
 
+        # Output dictionary
+        start_output = time.time()
+        out = {
+            'pred_poses': pred_poses[-1], 
+            'pred_betas': pred_betas[-1],
+            'pred_boxes': pred_boxes[-1], 
+            'pred_confs': pred_confs[-1],
+            'pred_j3ds': pred_j3ds[-1], 
+            'pred_j2ds': pred_j2ds[-1],
+            'pred_verts': pred_verts, 
+            'pred_intrinsics': pred_intrinsics,
+            'pred_depths': pred_depths[-1], 
+            'pred_transl': pred_transl,
+            'pred_cam_xys': pred_cam_xys
+        }
 
-        if self.training > 0 and self.use_dn:
-            pred_poses, pred_betas,\
-            pred_boxes, pred_confs,\
-            pred_j3ds, pred_j2ds, pred_depths,\
-            pred_verts, pred_transl =\
-                dn_post_process(pred_poses, pred_betas,
-                                pred_boxes, pred_confs,
-                                pred_j3ds, pred_j2ds, pred_depths,
-                                pred_verts, pred_transl,
-                                dn_meta, self.aux_loss, self._set_aux_loss)
-
-
-        out = {'pred_poses': pred_poses[-1], 'pred_betas': pred_betas[-1],
-                'pred_boxes': pred_boxes[-1], 'pred_confs': pred_confs[-1], 
-               'pred_j3ds': pred_j3ds[-1], 'pred_j2ds': pred_j2ds[-1],
-               'pred_verts': pred_verts, 'pred_intrinsics': pred_intrinsics, 
-               'pred_depths': pred_depths[-1], 'pred_transl': pred_transl,
-               'pred_cam_xys': pred_cam_xys}
-        
         if self.aux_loss and self.training:
-            out['aux_outputs'] = self._set_aux_loss(pred_poses, pred_betas,
-                                                    pred_boxes, pred_confs,
-                                                    pred_j3ds, pred_j2ds, pred_depths)
+            out['aux_outputs'] = self._set_aux_loss(
+                pred_poses, pred_betas, pred_boxes, pred_confs, pred_j3ds, pred_j2ds, pred_depths
+            )
 
         if self.use_sat:
             out['enc_outputs'] = scale_map_dict
         
         out['sat'] = sat_dict
 
-        if self.training > 0 and self.use_dn:
+        if self.training and self.use_dn:
             out['dn_meta'] = dn_meta
+        timers['output_assembly'] = time.time() - start_output
+
+        # Total time
+        timers['total'] = time.time() - start_total
+
+        # Print timing results
+        print("Timing results (seconds):")
+        for key, value in timers.items():
+            print(f"{key}: {value:.4f}")
 
         return out
 
@@ -765,7 +850,7 @@ class MLP(nn.Module):
         return x
 
 
-def build_sat_model(args, set_criterion=True):
+def build_sat_model(args, set_criterion=False):
     encoder = build_encoder(args)
     decoder = build_decoder(args)
 
@@ -778,7 +863,6 @@ def build_sat_model(args, set_criterion=True):
         dn_cfg=args.dn_cfg,
         train_pos_embed=getattr(args,'train_pos_embed',True)
     )
-
 
     if set_criterion:
         matcher = build_matcher(args)
