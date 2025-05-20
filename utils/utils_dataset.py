@@ -84,3 +84,23 @@ def generate_image_patch(cvimg, c_x, c_y, bb_width, bb_height, patch_width, patc
     img_patch = cv2.warpAffine(img, trans, (int(patch_width), int(patch_height)), flags=cv2.INTER_LINEAR)
 
     return img_patch, trans, trans_inv
+
+def extract_posetrack17_from_smplx(joints_smplx):
+    """
+    joints_smplx: (N, K, 3) tensor/list des keypoints 3D (ou 2D) de SMPL-X
+    retourne les 17 keypoints au format PoseTrack
+    """
+    smplx_to_posetrack17 = [
+        24, 16, 15, 18, 17,   # nose, l_eye, r_eye, l_ear, r_ear
+        5, 2, 6, 3, 7, 4,     # l_shoulder to r_wrist
+        12, 9, 13, 10, 14,11  # hips to ankles
+    ]
+    
+    return joints_smplx[:, smplx_to_posetrack17, :]
+
+def encode_keypoints_xyv(joints):
+    """
+    joints: (K, 3) avec (x, y, visibility)
+    retourne: flat list [x1,y1,v1, x2,y2,v2, …]
+    """
+    return joints[:, :3].reshape(-1).tolist()

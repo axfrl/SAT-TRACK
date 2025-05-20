@@ -9,6 +9,8 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 
+import json
+import glob
 import joblib
 
 from .funcs.video_stream_funcs import get_transform, preprocess_frame, create_empty_targets
@@ -144,25 +146,27 @@ class Engine:
                 t_=frame_id,
                 measurments=(h, w, input_size, left, top)
             )
-
-            self.phalp_tracker.tracker.predict()
-            self.phalp_tracker.tracker.update(dets, frame_id, str(frame_id), self.phalp_tracker.cfg.phalp.shot)
+            with torch.no_grad():
+                self.phalp_tracker.tracker.predict()
+                self.phalp_tracker.tracker.update(dets, frame_id, str(frame_id), self.phalp_tracker.cfg.phalp.shot)
 
             detec_pose, hist_pose = {}, {}
             for tr in self.phalp_tracker.tracker.tracks:
                 if not tr.is_confirmed() or tr.time_since_update >= 5:
+                    if not tr.is_confirmed(): print("pas confirme")
+                    print("OH LA GALEEERRRREEEEE")
                     continue
                 tid = tr.track_id
                 history = tr.track_data['history']
+                detec_pose[tid] = history[-1]['3d_joints']
                 if len(history) > 3:
                     hist_pose[tid] = history[-2]['3d_joints']
 
-            diag_hist = compute_persistence_diagrams(hist_pose)
-            diag_detec = compute_persistence_diagrams(detec_pose)
-            dist_mat = compute_cross_distance_matrix(list(diag_hist.values()), list(diag_detec.values()), epsilon=0.05)
-
-            heatmap = generate_heatmap_image(dist_mat, list(diag_hist.keys()), list(diag_detec.keys()))
-            diagram_img = generate_persistence_diagram_image(diag_detec, self.phalp_tracker.color_dict)
+            #diag_hist = compute_persistence_diagrams(hist_pose)
+            #diag_detec = compute_persistence_diagrams(detec_pose)
+            #dist_mat = compute_cross_distance_matrix(list(diag_hist.values()), list(diag_detec.values()), epsilon=0.05)
+            #heatmap = generate_heatmap_image(dist_mat, list(diag_hist.keys()), list(diag_detec.keys()))
+            #diagram_img = generate_persistence_diagram_image(diag_detec, self.phalp_tracker.color_dict)
 
         confs = outputs['pred_confs'][0].view(-1)
         
@@ -234,37 +238,131 @@ class Engine:
         elapsed = time.time() - t_start
         print(f"Processed {frame_count} frames in {elapsed:.2f}s ({frame_count/elapsed:.2f} FPS)")
 
-    def eval(self, input_size, conf_thresh):
-        videos = np.load(self.dataset_dir)
+    def create_posetrack_json_from_model(self, root_eval_dir, output_json_path):
+        """
+        Construit le JSON PoseTrack en appelant le modèle frame par frame.
+        
+        Args:
+            root_eval_dir (str): dossier racine contenant les sous-dossiers des scènes avec images.
+            output_json_path (str): chemin de sortie du JSON.
+            model (callable): fonction ou objet tel que `model(image) -> List[Dict]` 
+                            avec chaque dict = {"track_id", "bbox", "keypoints", "score"}
+            extract_kpts_fn (callable): fonction pour adapter les keypoints si besoin (ex: SMPL-X → PoseTrack)
+        """
+        images = []
+        annotations = []
+        ann_id = 1
+        img_id = 1
+        
+        scene_dirs = sorted([d for d in os.listdir(root_eval_dir) if os.path.isdir(os.path.join(root_eval_dir, d))])
 
-        base_path = '_DATA/posetrack_2018/images/val/'
+        for scene in scene_dirs:
+            scene_path = os.path.join(root_eval_dir, scene)
+            img_paths = sorted(glob(os.path.join(scene_path, "*.jpg")))
 
-        os.makedirs(self.eval_cfg.results_dir, exist_ok=True)
-
-        for video_name in videos:
-            print(f"[INFO] Evaluating video {video_name}")
-            video_path = os.path.join(base_path, video_name)
-            image_files = sorted([
-                os.path.join(video_path, f) for f in os.listdir(video_path)
-                if f.endswith(('.jpg', '.png'))
-            ])
-
-            video_results = {}  # format attendu par evaluate_trackers
-
-            for frame_id, img_path in enumerate(image_files):
-                frame = cv2.imread(img_path)
-                if frame is None:
-                    print(f"[Warning] Could not read frame {img_path}, skipping.")
+            for frame_idx, img_path in enumerate(img_paths, start=1):
+                # 1) Charger image
+                image = cv2.imread(img_path)
+                if image is None:
+                    print(f"[Warning] Image introuvable: {img_path}")
                     continue
+                
+                height, width = image.shape[:2]
 
-                # ATTENTION : _process_frame doit retourner (ids, features)
-                ids, features = self._process_frame(
-                    frame, frame_id + 1, input_size, conf_thresh, display=False, return_dict=True
-                )
+                # 2) Passer au modèle
+                raw_outputs = self.eval_posetrack_frame(image)  # output: List[Dict]
+                detections = []
+                for det in raw_outputs:
+                    det['keypoints'] = extract_kpts_fn(det['keypoints'])  # ajuster si SMPL-X
+                    detections.append(det)
 
-                video_results[str(frame_id + 1).zfill(6)] = [ids, features]  # frame_id sous forme de string comme '000001'
+                # 3) Enregistrer l’image
+                images.append({
+                    "id": img_id,
+                    "file_name": os.path.join(scene, os.path.basename(img_path)),
+                    "frame_id": frame_idx,
+                    "height": height,
+                    "width": width,
+                    "scene_id": scene
+                })
 
-            # Sauvegarde dans results_dir/video_name.pkl
-            out_path = os.path.join(self.eval_cfg.results_dir, f"{video_name}.pkl")
-            joblib.dump(video_results, out_path)
-            print(f"[INFO] Saved predictions to {out_path}")
+                # 4) Ajouter les annotations pour cette image
+                for det in detections:
+                    annotations.append({
+                        "id": ann_id,
+                        "image_id": img_id,
+                        "track_id": det["track_id"],
+                        "category_id": 1,
+                        "bbox": det["bbox"],           # [x, y, w, h]
+                        "keypoints": det["keypoints"], # [x1, y1, v1, ..., x17, y17, v17]
+                        "score": det.get("score", 1.0)
+                    })
+                    ann_id += 1
+
+                img_id += 1
+
+        # 5) Catégories (standard PoseTrack)
+        categories = [{
+            "id": 1,
+            "name": "person",
+            "keypoints": [
+                "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+                "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+                "left_wrist", "right_wrist", "left_hip", "right_hip",
+                "left_knee", "right_knee", "left_ankle", "right_ankle"
+            ],
+            "skeleton": []  # optionnel
+        }]
+
+        # 6) Sauvegarde
+        out = {
+            "images": images,
+            "annotations": annotations,
+            "categories": categories
+        }
+
+        os.makedirs(os.path.dirname(output_json_path), exist_ok=True)
+        with open(output_json_path, "w") as f:
+            json.dump(out, f, indent=2)
+
+        print(f"✅ JSON créé: {output_json_path}")
+        print(f"   {len(images)} images, {len(annotations)} annotations, {len(scene_dirs)} scènes.")
+   
+    def eval_posetrack_frame(self, frame, frame_id, input_size, conf_thresh):
+        h, w = frame.shape[:2]
+
+        tensor = preprocess_frame(frame, input_size, self.device)
+        if self.use_fp16:
+            tensor = tensor.half()
+
+        with torch.no_grad():
+            with torch.amp.autocast(device_type="cuda"):
+                outputs = self.model(tensor, create_empty_targets(self.device, [h, w]))
+
+        pad_h, pad_w = input_size - h, input_size - w
+        left, top = pad_w // 2, pad_h // 2
+
+        dets = self.phalp_tracker.get_human_features(
+            sat_data=outputs,
+            image=frame,
+            frame_name=str(frame_id),
+            t_=frame_id,
+            measurments=(h, w, input_size, left, top)
+        )
+
+        with torch.no_grad():
+            self.phalp_tracker.tracker.predict()
+            self.phalp_tracker.tracker.update(dets, frame_id, str(frame_id), self.phalp_tracker.cfg.phalp.shot)
+
+        result = []
+        for tr in self.phalp_tracker.tracker.tracks:
+            if not tr.is_confirmed() or tr.time_since_update >= 5:
+                continue
+            tid = tr.track_id
+            history = tr.track_data['history']
+            detec_pose = history[-1]['2d_joints']
+
+
+        confs = outputs['pred_confs'][0].view(-1)
+
+        return frame

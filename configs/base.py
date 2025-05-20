@@ -25,6 +25,7 @@ class PHALPConfig:
     predict: str = 'APL'
     pose_distance: str = 'smpl'
     distance_type: str = 'EQ_019'
+    mask_path: str = f"{WEIGHTS_DIR}/sam_vit_h_4b8939.pth"
     alpha: float = 0.1
     low_th_c: float = 0.23
     hungarian_th: float = 100.0
@@ -120,6 +121,52 @@ class ExtraConfig:
 
 @dataclass
 class EvalConfig:
+    # Identification et dataset
+    batch_id: int = -1
+    track_dataset: str = "posetrack"
+    predict: str = "APL"
+    storage_folder: str = "Videos_v20.000"
+    distance_type: str = "A5"
+    use_gt: bool = False
+    overwrite: bool = False
+
+    # Tracking
+    alpha: float = 0.1
+    low_th_c: float = 0.20
+    hungarian_th: float = 100.0
+    track_history: int = 7
+    max_age_track: int = 20
+    n_init: int = 1
+    max_ids: int = 50
+    verbose: bool = False
+    detect_shots: bool = False
+
+    # Vidéos et chemins
+    base_path: Optional[str] = None
+    video_seq: str = "_DATA/posetrack/list_videos_val.npy"
+    all_videos: bool = True
+    store_mask: bool = True
+
+    # Rendu
+    render: bool = False
+    render_type: str = "HUMAN_HEAD_FAST"
+    render_up_scale: int = 2
+    res: int = 256
+    downsample: int = 1
+
+    # Encodage et traitement
+    encode_type: str = "3c"
+    cva_type: str = "least_square"
+    past_lookback: int = 1
+    mask_type: str = "feat"
+    detection_type: str = "mask2"
+    start_frame: int = 1000
+    end_frame: int = 1100
+    store_extra_info: bool = False
+
+    # Variables ajoutées à la volée dans parse()
+    sample: str = ""
+    post_fix: str = ""
     dataset_dir: str = "path/to/video/track/dataset"                                    # !!!!!!!!!!!!! NOT SET !!!!!!!!!!!!!!
     result_dir: str = "/home/alphafalcon/tracker/code/SAT-TRACK/eval"
 
@@ -130,7 +177,7 @@ class SATHMRConfig:
     infer_batch_size: int = 1
     infer_num_workers: int = 8
     distributed_infer: bool = True
-    conf_thresh: float = 0.23
+    conf_thresh: float = 0.2
     display: bool = False
     live_stream: bool = True
     use_fp16: bool = False
@@ -171,7 +218,7 @@ class FullConfig:
     track_dataset: str = "demo"
     device: str = "cuda"
     base_tracker: str = "PHALP"
-    tracker_on: bool = False
+    tracker_on: bool = True
     eval_cfg: EvalConfig = field(default_factory=EvalConfig)
     train: bool = False
     debug: bool = False

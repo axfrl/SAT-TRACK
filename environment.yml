@@ -14,10 +14,11 @@ dependencies:
   - tensorboard
   - joblib
   - termcolor
-  - pytorch=2.1.2
-  - torchvision=0.16.2
-  - torchaudio=2.1.2
-  - pytorch-cuda=12.1
+  - pytorch
+  - torchvision
+  - pytorch-cuda
+  - libjpeg-turbo
+  - libpng
   - hydra-core
   - omegaconf
   - einops
@@ -34,7 +35,7 @@ dependencies:
       - pyrender==0.1.45
       - trimesh
       - transformers
-      - xformers==0.0.28.post1 --extra-index-url https://download.pytorch.org/whl/cu121
+      - xformers==0.0.28.post1
       - ffmpeg
       - decord
       - dill
@@ -42,4 +43,5 @@ dependencies:
       - ripser
       - persim
       - fiftyone
+      - giotto-tda
       - git+https://github.com/facebookresearch/segment-anything.git

@@ -29,8 +29,14 @@ import gdown
 from smplx.lbs import batch_rodrigues  # ou bien pytorch3d.transforms.axis_angle_to_matrix
 from topology.persistence_analysis import compute_persistence_diagrams
 import matplotlib.pyplot as plt
-from gtda.homology import VietorisRipsPersistence
+#from gtda.homology import VietorisRipsPersistence
 from matplotlib import cm
+
+from PIL import Image
+
+import torchvision
+from torchvision.models.segmentation import fcn_resnet50, FCN_ResNet50_Weights
+from torchvision import transforms as T
 
 class TrackModel(nn.Module):
     def __init__(self, cfg, device, sat_model):
@@ -143,8 +149,7 @@ class TrackModel(nn.Module):
         # by default this will not be initialized
         self.postprocessor = Postprocessor(self.cfg, self)
     
-    def get_croped_image(self, image, bbox, bbox_pad, seg_mask):
-        
+    def old_get_croped_image(self, image, bbox, bbox_pad, seg_mask):
         # Encode the mask for storing, borrowed from tao dataset
         # https://github.com/TAO-Dataset/tao/blob/master/scripts/detectors/detectron2_infer.py
         masks_decoded = np.array(np.expand_dims(seg_mask, 2), order='F', dtype=np.uint8)
@@ -173,6 +178,70 @@ class TrackModel(nn.Module):
         
         masked_image = torch.cat((image_tmp, mask_tmp[:1, :, :]), 0)
         
+        return masked_image, center_, scale_, rles, center_pad, scale_pad
+    
+    def get_croped_image(self, image, bbox, bbox_pad, seg_mask):
+        """
+        Traite l'image et le masque pour générer une image masquée et des informations associées, compatible avec PHALP.
+
+        Args:
+            image: Image full-size (numpy array HWC, uint8)
+            bbox: [x_min, y_min, x_max, y_max] (coordonnées en pixels)
+            bbox_pad: Bbox avec padding [x_min, y_min, x_max, y_max]
+            seg_mask: Masque de segmentation (numpy array [H, W], uint8, ou None)
+
+        Returns:
+            masked_image: Image masquée (tensor)
+            center_: Centre de la bbox
+            scale_: Échelle de la bbox
+            rles: Encodage RLE du masque (ou None si masque invalide)
+            center_pad: Centre de la bbox avec padding
+            scale_pad: Échelle de la bbox avec padding
+        """
+        # 1. Vérifie et normalise seg_mask
+        rles = None
+        if seg_mask is None or not isinstance(seg_mask, np.ndarray) or seg_mask.ndim != 2:
+            print(f"[WARN] seg_mask invalide: {seg_mask.shape if isinstance(seg_mask, np.ndarray) else type(seg_mask)}, création d'un masque vide")
+            seg_mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
+        else:
+            # Encode le masque pour le stockage (format RLE)
+            try:
+                masks_decoded = np.expand_dims(seg_mask, 2).astype(np.uint8, order='F')  # [H, W, 1]
+                rles = mask_utils.encode(masks_decoded)
+                for rle in rles:
+                    rle["counts"] = rle["counts"].decode("utf-8")
+            except Exception as e:
+                print(f"[WARN] Erreur lors de l'encodage RLE: {e}, création d'un masque vide")
+                seg_mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
+                rles = None
+
+        # 2. Prépare le masque pour l'affichage (converti en RGB)
+        seg_mask = seg_mask.astype(np.uint8) * 255
+        seg_mask = np.expand_dims(seg_mask, 2)  # [H, W] -> [H, W, 1]
+        seg_mask = np.repeat(seg_mask, 3, axis=2)  # [H, W, 1] -> [H, W, 3]
+
+        # 3. Calcule les centres et échelles
+        center_ = np.array([(bbox[2] + bbox[0]) / 2, (bbox[3] + bbox[1]) / 2])
+        scale_ = np.array([(bbox[2] - bbox[0]), (bbox[3] - bbox[1])])
+
+        center_pad = np.array([(bbox_pad[2] + bbox_pad[0]) / 2, (bbox_pad[3] + bbox_pad[1]) / 2])
+        scale_pad = np.array([(bbox_pad[2] - bbox_pad[0]), (bbox_pad[3] - bbox_pad[1])])
+
+        # 4. Traite le masque et l'image
+        try:
+            mask_tmp = process_mask(seg_mask.astype(np.uint8), center_pad, 1.0 * np.max(scale_pad))
+            image_tmp = process_image(image, center_pad, 1.0 * np.max(scale_pad))
+        except Exception as e:
+            print(f"[WARN] Erreur lors du traitement de l'image ou du masque: {e}")
+            return None, None, None, None, None, None
+
+        # 5. Combine l'image et le masque
+        try:
+            masked_image = torch.cat((image_tmp, mask_tmp[:1, :, :]), dim=0)
+        except Exception as e:
+            print(f"[WARN] Erreur lors de la concaténation: {e}")
+            return None, None, None, None, None, None
+
         return masked_image, center_, scale_, rles, center_pad, scale_pad
     
     def get_detections(self, image, sat_data, frame_name, t_, additional_data=None, measurements=None):
@@ -264,17 +333,48 @@ class TrackModel(nn.Module):
             masks[i, y1:y2, x1:x2] = 1
         return masks
 
-    def _generate_sam_masks(self, bboxes, image, img_height, img_width):
-        sam = sam_model_registry["vit_h"](checkpoint="path/to/sam_vit_h.pth")
-        predictor = SamPredictor(sam)
-        predictor.set_image(image)
-        
-        masks = []
-        for bbox in bboxes:
-            box = np.array([bbox[0], bbox[1], bbox[2], bbox[3]])
-            mask, _, _ = predictor.predict(box=box, multimask_output=False)
-            masks.append(mask[0])
-        return np.array(masks)
+    
+    def generate_mask_from_vertices(self, vertices, cam_intrinsics, frame_size, radius=5, n_samples=100_000):
+        """
+        Génère un masque binaire approximant la silhouette à partir des vertices projetés.
+
+        Args:
+            vertices (np.ndarray): (N, 3) vertices du mesh (en mètres)
+            cam_intrinsics (np.ndarray): (3, 3) matrice K de la caméra
+            frame_size (tuple): (H, W) de l’image de sortie
+            radius (int): Rayon du noyau circulaire autour de chaque point projeté
+            n_samples (int): Nombre max de points à projeter
+
+        Returns:
+            mask (np.ndarray): (H, W) uint8 mask binaire (1 = humain)
+        """
+        H, W = map(int, frame_size)
+        if vertices.shape[0] == 0:
+            return np.zeros((H, W), dtype=np.uint8)
+
+        # Sous-échantillonnage si nécessaire
+        if vertices.shape[0] > n_samples:
+            idx = np.random.choice(vertices.shape[0], n_samples, replace=False)
+            vertices = vertices[idx]
+
+        # Projection 3D -> 2D
+        K = cam_intrinsics.astype(np.float32)
+        verts_proj = vertices @ K.T
+        pts2d = verts_proj[:, :2] / (verts_proj[:, 2:] + 1e-6)
+
+        # Clipping dans l’image
+        xs = np.clip(pts2d[:, 0], 0, W - 1).astype(np.int32)
+        ys = np.clip(pts2d[:, 1], 0, H - 1).astype(np.int32)
+
+        # Création d’un masque binaire
+        mask = np.zeros((H, W), dtype=np.uint8)
+        mask[ys, xs] = 1
+
+        # Dilatation circulaire pour obtenir un corps complet
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+        mask = cv2.dilate(mask, kernel, iterations=1)
+
+        return mask
 
     def transl3d_to_weak_cam(self, pred_transl, eps=1e-6):
         """
@@ -294,6 +394,7 @@ class TrackModel(nn.Module):
 
         cam_np = np.stack([scale, tx, ty], axis=1).astype(np.float32)
         return torch.from_numpy(cam_np)
+
 
     def get_human_features(self, sat_data, image, frame_name, t_, measurments, gt=None, ann=None, extra_data=None):
         """
@@ -341,6 +442,7 @@ class TrackModel(nn.Module):
         scale_list = []
         rles_list = []
         selected_ids = []
+        bbox_pad_list = []
         pred_classes = np.zeros(NPEOPLE, dtype=np.int64)  # Class 0 (person)
         ground_truth_track_id = [1] * NPEOPLE  # Default track IDs
         ground_truth_annotations = [[]] * NPEOPLE  # Default annotations
@@ -353,24 +455,38 @@ class TrackModel(nn.Module):
             if w < self.cfg.phalp.small_w or h < self.cfg.phalp.small_h:
                 continue
             
-            # Generate synthetic mask
-            mask = self._generate_synthetic_masks(pred_bbox[p_][None], img_height, img_width)[0]
+            # Generate mask using vertex-based method
+            verts = sat_data['pred_verts'][0][p_].reshape(-1, 3).cpu().numpy()
+            K = sat_data['pred_intrinsics'][0].reshape(3, 3).detach().cpu().numpy()
+            mask = self.generate_mask_from_vertices(verts, K, (img_height, img_width))  # No [0] needed, as it returns (H, W)
+            
+            if mask is None:
+                print(f"[INFO] Aucun masque généré pour la bbox {p_}, on passe.")
+                continue
+
+            # Encode mask to RLE for storage
             rle = mask_utils.encode(np.asfortranarray(mask.astype(np.uint8)))
             rle['counts'] = rle['counts'].decode('utf-8')
 
-            # Compute center, scale, and cropped image for HMAR
+            # Compute center, scale, and bbox with padding
             center = np.array([(pred_bbox[p_][0] + pred_bbox[p_][2]) / 2, (pred_bbox[p_][1] + pred_bbox[p_][3]) / 2])
             scale = np.array([w, h]) / self.cfg.render.res
             bbox = pred_bbox[p_]
             bbox_pad = np.array([bbox[0] - w * 0.125, bbox[1] - h * 0.125, bbox[2] + w * 0.125, bbox[3] + h * 0.125])
-            masked_image, center_pad, scale_pad, _, _, _ = self.get_croped_image(image, bbox, bbox_pad, mask)
-            
+            bbox_pad_list.append(bbox_pad)
+
+            # Get cropped image and information
+            masked_image, center_, scale_, rles, center_pad, scale_pad = self.old_get_croped_image(image, bbox, bbox_pad, mask)
+            if masked_image is None:
+                print(f"[INFO] Échec de get_croped_image pour la bbox {p_}, on passe.")
+                continue
+
             masked_image_list.append(masked_image)
             center_list.append(center_pad)
             scale_list.append(scale_pad)
-            rles_list.append(rle)
+            rles_list.append(rle)  # Store RLE instead of binary mask
             selected_ids.append(p_)
-        
+
         if len(selected_ids) == 0:
             return []
 
@@ -384,8 +500,7 @@ class TrackModel(nn.Module):
                 hmar_out = self.HMAR(masked_image_list.cuda(), **extra_args)
                 uv_vector = hmar_out['uv_vector']  # [BS, 256, 256, 3]
                 appe_embedding = self.HMAR.autoencoder_hmar(uv_vector, en=True)  # [BS, embedding_dim]
-                appe_embedding  = appe_embedding.view(appe_embedding.shape[0], -1)
-
+                appe_embedding = appe_embedding.view(appe_embedding.shape[0], -1)
         else:
             uv_vector = np.zeros((BS, 256, 256, 3))
             appe_embedding = torch.zeros(BS, 512)  # Dummy embedding
@@ -414,6 +529,7 @@ class TrackModel(nn.Module):
         pred_joints_2d = pred_j2ds[selected_ids].cpu().numpy()  # [BS, num_joints, 2]
         pred_cam = pred_transl[selected_ids].cpu().numpy()  # [BS, 3]
         pred_cam_weak = []
+        
         # Compute pose embedding
         if self.cfg.phalp.pose_distance == "joints":
             pose_embedding = torch.from_numpy(pred_joints_3d).view(BS, -1)
@@ -434,18 +550,30 @@ class TrackModel(nn.Module):
         pred_joints_2d_ = pred_joints_2d.reshape(BS, -1) / self.cfg.render.res
         pred_cam_ = pred_cam.reshape(BS, -1)
         loca_embedding = torch.cat((torch.from_numpy(pred_joints_2d_), torch.from_numpy(pred_cam_),
-                                torch.from_numpy(pred_cam_), torch.from_numpy(pred_cam_)), dim=1)
+                                    torch.from_numpy(pred_cam_), torch.from_numpy(pred_cam_)), dim=1)
 
         # Compute full embedding (for legacy)
         full_embedding = torch.cat((appe_embedding.cpu(), pose_embedding, loca_embedding), dim=1)
         
         # Create detection data list
         detection_data_list = []
+        all_masks = {idx: rles_list[i] for i, idx in enumerate(selected_ids)}  # Store RLEs in all_masks
         for i, p_ in enumerate(selected_ids):
+            # Generate global mask for visibility (decode RLEs)
+            joints_2d = pred_joints_2d[i]
+            keypoints = []
+            for j in range(joints_2d.shape[0]):
+                x, y = joints_2d[j]
+                if 0 <= x < img_width and 0 <= y < img_height:
+                    vi = 1
+                else:
+                    vi = 0
+                
+                keypoints.extend([x, y, vi])
             detection_data = {
                 "bbox": np.array([pred_bbox[p_][0], pred_bbox[p_][1],
                                 pred_bbox[p_][2] - pred_bbox[p_][0], pred_bbox[p_][3] - pred_bbox[p_][1]]),
-                "mask": rles_list[i],
+                "mask": rles_list[i],  # Store RLE instead of binary mask
                 "conf": pred_confs[p_].cpu().numpy(),
                 "appe": appe_embedding[i].cpu().numpy(),
                 "pose": pose_embedding[i].numpy(),
@@ -456,7 +584,7 @@ class TrackModel(nn.Module):
                 "scale": scale_list[i] * ratio,
                 "smpl": pred_smpl_params[i],
                 "camera": pred_cam_[i],
-                "camera_bbox": pred_cam_[i],  # Use transl as proxy
+                "camera_bbox": pred_cam_[i],
                 "pred_intrinsic": pred_intrinsic,
                 "pred_cam_xys": pred_cam_xys,
                 "3d_joints": pred_joints_3d[i],
@@ -468,7 +596,8 @@ class TrackModel(nn.Module):
                 "time": t_,
                 "ground_truth": gt[p_] if gt is not None else ground_truth_track_id[p_],
                 "annotations": ann[p_] if ann is not None else ground_truth_annotations[p_],
-                "extra_data": extra_data[p_] if extra_data is not None else None
+                "extra_data": extra_data[p_] if extra_data is not None else None,
+                "keypoints": keypoints  # Keep new feature
             }
             detection_data_list.append(Detection(detection_data))
 
