@@ -518,6 +518,7 @@ class Model(nn.Module):
                                          betas=shapes)
         num_verts = verts.shape[1]
         num_joints = joints.shape[1]
+        print(num_joints)
         verts = verts.reshape(bs,num_queries,num_verts,3)
         joints = joints.reshape(bs,num_queries,num_joints,3)
 
@@ -535,7 +536,7 @@ class Model(nn.Module):
         else:
             j2ds_homo = torch.matmul(j3ds_cam, cam_intrinsics.transpose(2,3))
         j2ds_img = (j2ds_homo[..., :2] / (j2ds_homo[..., 2, None] + 1e-6)).reshape(bs,num_queries,num_joints,2)
-
+        print(j2ds_img.shape)
         depths = j3ds_cam[:,:,0,2:]   # (bs, n_q, 1)
         depths = torch.cat([depths, depths/self.focal], dim=-1) # (bs, n_q, 2)
 

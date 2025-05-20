@@ -85,18 +85,32 @@ def generate_image_patch(cvimg, c_x, c_y, bb_width, bb_height, patch_width, patc
 
     return img_patch, trans, trans_inv
 
-def extract_posetrack17_from_smplx(joints_smplx):
+def smpl_to_coco_joints(smpl_joints):
     """
-    joints_smplx: (N, K, 3) tensor/list des keypoints 3D (ou 2D) de SMPL-X
-    retourne les 17 keypoints au format PoseTrack
+    Convertit des joints SMPL (45 x 3) en keypoints COCO 17 x 3.
+    Entrée : smpl_joints de forme (B, 45, 3) ou (45, 3) en torch.Tensor ou numpy.ndarray.
+    Sortie : points COCO de forme (B, 17, 3) ou (17, 3), même type que l'entrée.
+    La liste des indices SMPL à extraire est :
+      [24, 26, 25, 28, 27, 16, 17, 18, 19, 20, 21, 1, 2, 4, 5, 7, 8]
+    correspondant à ['nose','left_eye','right_eye','left_ear','right_ear',
+                     'L_Shoulder','R_Shoulder','L_Elbow','R_Elbow',
+                     'L_Wrist','R_Wrist','L_Hip','R_Hip','L_Knee','R_Knee','L_Ankle','R_Ankle'].
     """
-    smplx_to_posetrack17 = [
-        24, 16, 15, 18, 17,   # nose, l_eye, r_eye, l_ear, r_ear
-        5, 2, 6, 3, 7, 4,     # l_shoulder to r_wrist
-        12, 9, 13, 10, 14,11  # hips to ankles
-    ]
-    
-    return joints_smplx[:, smplx_to_posetrack17, :]
+    # Indices des joints SMPL correspondant aux 17 points COCO
+    coco_indices = [24, 26, 25, 28, 27, 16, 17, 18, 19, 20, 21, 1, 2, 4, 5, 7, 8]
+    # Gérer entrée sans batch (45,3) en ajoutant une dimension
+    has_batch = (smpl_joints.ndim == 3)
+    if not has_batch:
+        smpl_joints = smpl_joints[None, ...]  # deviens (1, 45, 3)
+    # Conversion pour torch.Tensor ou numpy.ndarray
+    if isinstance(smpl_joints, torch.Tensor):
+        coco_joints = smpl_joints[:, coco_indices, :]
+    else:
+        coco_joints = smpl_joints[:, coco_indices, :]
+    # Remettre à la forme (17,3) si pas de batch initial
+    if not has_batch:
+        coco_joints = coco_joints[0]
+    return coco_joints
 
 def encode_keypoints_xyv(joints):
     """

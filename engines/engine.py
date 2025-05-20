@@ -154,7 +154,6 @@ class Engine:
             for tr in self.phalp_tracker.tracker.tracks:
                 if not tr.is_confirmed() or tr.time_since_update >= 5:
                     if not tr.is_confirmed(): print("pas confirme")
-                    print("OH LA GALEEERRRREEEEE")
                     continue
                 tid = tr.track_id
                 history = tr.track_data['history']

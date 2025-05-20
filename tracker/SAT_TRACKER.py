@@ -21,7 +21,7 @@ from models.human_models.hmar import HMAR
 from models.predictor import Pose_transformer_v2
 from utils.utils import (convert_pkl, get_prediction_interval,
                                progress_bar, smpl_to_pose_camera_vector)
-from utils.utils_dataset import process_image, process_mask
+from utils.utils_dataset import process_image, process_mask, smpl_to_coco_joints
 from utils.utils_download import cache_url
 from utils.postprocessor import Postprocessor
 from sklearn.linear_model import Ridge
@@ -37,6 +37,30 @@ from PIL import Image
 import torchvision
 from torchvision.models.segmentation import fcn_resnet50, FCN_ResNet50_Weights
 from torchvision import transforms as T
+
+# --- Fonction utilitaire SMPL45 → COCO17 (numpy) ---
+COCO17_SMPL45_INDICES = [24, 26, 25, 28, 27, 16, 17, 18, 19,
+                         20, 21,  1,  2,  4,  5,  7,  8]
+COCO17_NAMES = [
+    'nose','left_eye','right_eye','left_ear','right_ear',
+    'left_shoulder','right_shoulder','left_elbow','right_elbow',
+    'left_wrist','right_wrist','left_hip','right_hip',
+    'left_knee','right_knee','left_ankle','right_ankle'
+]
+
+def smpl45_to_coco17(j2ds_smpl: np.ndarray) -> np.ndarray:
+    """
+    j2ds_smpl: np.array de forme (B, 45, 2) ou (45,2)
+    return   : np.array de forme (B, 17, 2) ou (17,2)
+    """
+    # Gérer cas sans batch
+    batched = (j2ds_smpl.ndim == 3)
+    if not batched:
+        j2ds_smpl = j2ds_smpl[None, ...]  # (1,45,2)
+    # Sélection et reorder
+    j2ds_coco = j2ds_smpl[:, COCO17_SMPL45_INDICES, :]  # (B,17,2)
+    # Renvoyer à la forme initiale
+    return j2ds_coco[0] if not batched else j2ds_coco
 
 class TrackModel(nn.Module):
     def __init__(self, cfg, device, sat_model):
@@ -527,6 +551,11 @@ class TrackModel(nn.Module):
 
         pred_joints_3d = pred_j3ds[selected_ids].cpu().numpy()  # [BS, num_joints, 3]
         pred_joints_2d = pred_j2ds[selected_ids].cpu().numpy()  # [BS, num_joints, 2]
+        
+        j2ds_smpl = pred_j2ds[selected_ids].cpu().numpy()  # [BS, 45, 2]
+        # convertis en 17 keypoints COCO
+        j2ds_coco = smpl45_to_coco17(j2ds_smpl)            # [BS, 17, 2]
+
         pred_cam = pred_transl[selected_ids].cpu().numpy()  # [BS, 3]
         pred_cam_weak = []
         
@@ -560,7 +589,7 @@ class TrackModel(nn.Module):
         all_masks = {idx: rles_list[i] for i, idx in enumerate(selected_ids)}  # Store RLEs in all_masks
         for i, p_ in enumerate(selected_ids):
             # Generate global mask for visibility (decode RLEs)
-            joints_2d = pred_joints_2d[i]
+            joints_2d = j2ds_coco[i]
             keypoints = []
             for j in range(joints_2d.shape[0]):
                 x, y = joints_2d[j]
@@ -570,6 +599,7 @@ class TrackModel(nn.Module):
                     vi = 0
                 
                 keypoints.extend([x, y, vi])
+            print(len(keypoints)/3)
             detection_data = {
                 "bbox": np.array([pred_bbox[p_][0], pred_bbox[p_][1],
                                 pred_bbox[p_][2] - pred_bbox[p_][0], pred_bbox[p_][3] - pred_bbox[p_][1]]),
