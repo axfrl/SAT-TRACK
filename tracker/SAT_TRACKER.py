@@ -209,7 +209,7 @@ class TrackModel(nn.Module):
 
         return mask
     
-    def get_croped_image(self, image, bbox, bbox_pad, seg_mask):
+    def _get_croped_image(self, image, bbox, bbox_pad, seg_mask):
         
         # Encode the mask for storing, borrowed from tao dataset
         # https://github.com/TAO-Dataset/tao/blob/master/scripts/detectors/detectron2_infer.py
@@ -241,6 +241,62 @@ class TrackModel(nn.Module):
         
         return masked_image, center_, scale_, rles, center_pad, scale_pad
 
+    def get_cropped_image(self, image_tensor, bbox, bbox_pad, mask):
+        """
+        Crop and process an image and mask using GPU-based operations.
+        
+        Args:
+            image_tensor: Input image tensor [C, H, W] on GPU.
+            bbox: Bounding box [x1, y1, x2, y2] as a torch.Tensor on GPU.
+            bbox_pad: Padded bounding box [x1, y1, x2, y2] as a torch.Tensor on GPU.
+            mask: Segmentation mask (H, W) as a numpy array on CPU.
+            device: Device to use ('cuda' or 'cpu').
+        
+        Returns:
+            masked_image: Cropped and processed image tensor [C+1, H', W'].
+            center: Center of original bbox [2] (numpy).
+            scale: Scale of original bbox [2] (numpy).
+            rles: RLE-encoded mask (list).
+            center_pad: Center of padded bbox [2] (numpy).
+            scale_pad: Scale of padded bbox [2] (numpy).
+        """
+        # Convertir le masque en tenseur et le déplacer sur GPU
+        mask_tensor = torch.from_numpy(mask).float().to(self.device)
+
+        # Préparer le masque (multiplier par 255 et gérer les dimensions)
+        mask_tensor = (mask_tensor * 255).to(torch.uint8)
+        if len(mask_tensor.shape) == 2:
+            mask_tensor = mask_tensor.unsqueeze(2).repeat(1, 1, 3)  # [H, W, 3]
+
+        # Calculer centre et échelle pour la bbox originale
+        center = (bbox[:2] + bbox[2:]) / 2  # [x, y]
+        scale = bbox[2:] - bbox[:2]         # [w, h]
+
+        # Calculer centre et échelle pour la bbox avec padding
+        center_pad = (bbox_pad[:2] + bbox_pad[2:]) / 2
+        scale_pad = bbox_pad[2:] - bbox_pad[:2]
+
+        # Appliquer process_mask et process_image (supposés compatibles GPU)
+        mask_tmp = process_mask_torch(mask_tensor, center_pad, 1.0 * scale_pad.max())
+        image_tmp = process_image_torch(image_tensor, center_pad, 1.0 * scale_pad.max())
+
+        # Concaténer image et masque
+        masked_image = torch.cat((image_tmp, mask_tmp[:1, :, :]), dim=0)
+
+        # Encoder le masque en RLE (nécessite CPU)
+        masks_decoded = np.array(np.expand_dims(mask, 2), order='F', dtype=np.uint8)
+        rles = mask_utils.encode(masks_decoded)
+        for rle in rles:
+            rle["counts"] = rle["counts"].decode("utf-8")
+
+        # Retourner les résultats (centres et échelles sur CPU pour compatibilité)
+        return (masked_image, 
+                center.cpu().numpy(), 
+                scale.cpu().numpy(), 
+                rles, 
+                center_pad.cpu().numpy(), 
+                scale_pad.cpu().numpy())
+    
     def _generate_synthetic_masks(self, bboxes, img_height, img_width):
         """
         Generate synthetic binary masks from bounding boxes.
