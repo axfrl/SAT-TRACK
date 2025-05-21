@@ -114,7 +114,6 @@ class Engine:
             writer.release()
         print(f"[Writer] Total frames written: {n_frames_written}")
 
-    @profile
     def _process_frame(self, frame, frame_id, input_size, conf_thresh, display):
         h, w = frame.shape[:2]
         transform = get_transform(input_size=input_size, orig_h=h, orig_w=w, device=self.device)
@@ -167,7 +166,6 @@ class Engine:
         #final = overlay_diagram_on_frame(frame, diagram_img, position=(10,10), alpha=0.7, brightness_factor=1.5, size_factor=1.5, heatmap_height=hmap_h)
         return frame
     
-    @profile
     def infer_video(self, input_video, output_video, input_size, conf_thresh, display=False):
         cap = cv2.VideoCapture(input_video)
         if not cap.isOpened():

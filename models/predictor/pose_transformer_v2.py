@@ -384,7 +384,7 @@ class Pose_transformer_v2(nn.Module):
         # loop thorugh each person and construct the input data
         t_end = []
         for p_ in range(en_time.shape[0]):
-            t_min = en_time[p_, 0].min()
+            t_min = en_time[p_].min()
             # loop through time 
             for t_ in range(en_time.shape[1]):
                 # get the time from start.
