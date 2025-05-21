@@ -608,8 +608,7 @@ class TrackModel(nn.Module):
                     vi = 0
                     count_out += 1
                 keypoints.extend([x, y, vi])
-            if count_out > 7:
-                print(keypoints)
+            
             detection_data = {
                 "bbox": np.array([pred_bbox[p_][0], pred_bbox[p_][1],
                                 pred_bbox[p_][2] - pred_bbox[p_][0], pred_bbox[p_][3] - pred_bbox[p_][1]]),
@@ -636,7 +635,8 @@ class TrackModel(nn.Module):
                 "time": t_,
                 "ground_truth": gt[p_] if gt is not None else ground_truth_track_id[p_],
                 "annotations": ann[p_] if ann is not None else ground_truth_annotations[p_],
-                "extra_data": extra_data[p_] if extra_data is not None else None
+                "extra_data": extra_data[p_] if extra_data is not None else None,
+                "keypoints": keypoints
             }
             detection_data_list.append(Detection(detection_data))
 

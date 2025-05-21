@@ -9,6 +9,11 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 
+from tqdm import tqdm
+
+import json
+from glob import glob
+
 from .funcs.video_stream_funcs import get_transform, preprocess_frame, create_empty_targets
 from utils.visualization import (
     vis_vertices_img,
@@ -39,6 +44,7 @@ class Engine:
         os.makedirs(self.output_dir, exist_ok=True)
         self._prepare_models(args.sathmr)
         self.phalp_tracker = TrackModel(args, self.device, self.model)
+        self.input_size = 1288
 
     def _set_device(self, gpu_id=0):
         if torch.cuda.is_available() and gpu_id < torch.cuda.device_count():
@@ -204,3 +210,109 @@ class Engine:
 
         elapsed = time.time() - t_start
         print(f"Processed {frame_count} frames in {elapsed:.2f}s ({frame_count/elapsed:.2f} FPS)")
+
+    @profile
+    def create_posetrack_json_from_model(self, root_eval_dir, output_json_path):
+        images = []
+        annotations = []
+        
+        scene_dirs = sorted([d for d in os.listdir(root_eval_dir) if os.path.isdir(os.path.join(root_eval_dir, d))])
+
+        for scene in tqdm(scene_dirs):
+            scene_path = os.path.join(root_eval_dir, scene)
+            img_paths = sorted(glob(os.path.join(scene_path, "*.jpg")))
+
+            for frame_idx, img_path in enumerate(img_paths, start=1):
+                image = cv2.imread(img_path)
+                if image is None:
+                    print(f"[Warning] Image introuvable: {img_path}")
+                    continue
+
+                detections = self.annote_posetrack_frame(image, frame_idx, self.input_size)
+
+                images.append({
+                    "id": frame_idx,
+                    "file_name": os.path.join(scene, os.path.basename(img_path)),
+                    "frame_id": frame_idx
+                })
+
+                for det in detections:
+                    det["id"] = det["image_id"] * 1000 + det["track_id"]  # ID unique par annotation
+                    annotations.append(det)
+
+        categories = [{
+            "id": 1,
+            "name": "person",
+            "keypoints": [
+                "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+                "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+                "left_wrist", "right_wrist", "left_hip", "right_hip",
+                "left_knee", "right_knee", "left_ankle", "right_ankle"
+            ],
+            "skeleton": []
+        }]
+
+        out = {
+            "images": images,
+            "annotations": annotations,
+            "categories": categories
+        }
+
+        os.makedirs(os.path.dirname(output_json_path), exist_ok=True)
+        with open(output_json_path, "w") as f:
+            json.dump(out, f, indent=2)
+
+        print(f"✅ JSON créé: {output_json_path}")
+        print(f"   {len(images)} images, {len(annotations)} annotations, {len(scene_dirs)} scènes.")
+
+    @profile
+    def annote_posetrack_frame(self, frame, frame_id, input_size):
+        h, w = frame.shape[:2]
+        transform = get_transform(input_size=input_size, orig_h=h, orig_w=w, device=self.device)
+        tensor = preprocess_frame(frame, transform, self.device)
+        if self.use_fp16:
+            tensor = tensor.half()
+
+        with torch.no_grad():
+            with torch.amp.autocast(device_type="cuda"):
+                outputs = self.model(tensor, create_empty_targets(self.device, [h, w]))
+
+        pad_h, pad_w = input_size - h, input_size - w
+        left, top = pad_w // 2, pad_h // 2
+
+        dets = self.phalp_tracker.get_human_features(
+            sat_data=outputs,
+            image=frame,
+            frame_name=str(frame_id),
+            t_=frame_id,
+            measurments=(h, w, input_size, left, top)
+        )
+
+        with torch.no_grad():
+            self.phalp_tracker.tracker.predict()
+            self.phalp_tracker.tracker.update(dets, frame_id, str(frame_id), self.phalp_tracker.cfg.phalp.shot)
+
+        result = []
+        for tr in self.phalp_tracker.tracker.tracks:
+            if not tr.is_confirmed() or tr.time_since_update >= 5:
+                continue
+            tid = tr.track_id
+
+            history = tr.track_data['history'][-1]
+            keypoints = history['keypoints']
+            conf = history['conf']
+            bbox = history['bbox']
+
+            track_dict = {
+                "id": -1,  # sera mis dans la fonction appelante
+                "bbox": list(bbox),
+                "image_id": frame_id,
+                "keypoints": keypoints,
+                "scores": [conf] * (len(keypoints) // 3),
+                "person_id": tid,
+                "track_id": tid
+            }
+
+            result.append(track_dict)
+
+        return result

@@ -167,6 +167,9 @@ class FullConfig:
     device: str = "cuda"
     base_tracker: str = "PHALP"
     train: bool = False
+    mode: str = "eval"
+    eval_data_dir: str = "/home/alphafalcon/tracker/code/SAT-TRACK/datasets/PoseTrack21-main/images/val"
+    eval_out_path: str = "/home/alphafalcon/tracker/code/SAT-TRACK/eval_result"
     debug: bool = False
     use_gt: bool = False
     overwrite: bool = True
