@@ -26,7 +26,7 @@ class PHALPConfig:
     pose_distance: str = 'smpl'
     distance_type: str = 'EQ_019'
     alpha: float = 0.1
-    low_th_c: float = 0.25
+    low_th_c: float = 0.2
     hungarian_th: float = 100.0
     track_history: int = 7
     max_age_track: int = 50
@@ -77,7 +77,7 @@ class PostProcessConfig:
     apply_smoothing: bool = True
     phalp_pkl_path: str = '_OUT/videos_v0'
     save_fast_tracks: bool = False
-
+    
 @dataclass
 class SMPLConfig:
     MODEL_PATH: str = f"{WEIGHTS_DIR}/smpl_data/smpl/"
@@ -125,9 +125,9 @@ class SATHMRConfig:
     infer_batch_size: int = 1
     infer_num_workers: int = 8
     distributed_infer: bool = True
-    conf_thresh: float = 0.25
+    conf_thresh: float = 0.2
     display: bool = False
-    live_stream: bool = False
+    live_stream: bool = True
     use_fp16: bool = False
     render_mode: str = 'points'
     input_size: int = 1288

@@ -32,6 +32,30 @@ import matplotlib.pyplot as plt
 from gtda.homology import VietorisRipsPersistence
 from matplotlib import cm
 
+# --- Fonction utilitaire SMPL45 → COCO17 (numpy) ---
+COCO17_SMPL45_INDICES = [24, 26, 25, 28, 27, 16, 17, 18, 19,
+                         20, 21,  1,  2,  4,  5,  7,  8]
+COCO17_NAMES = [
+    'nose','left_eye','right_eye','left_ear','right_ear',
+    'left_shoulder','right_shoulder','left_elbow','right_elbow',
+    'left_wrist','right_wrist','left_hip','right_hip',
+    'left_knee','right_knee','left_ankle','right_ankle'
+]
+
+def smpl45_to_coco17(j2ds_smpl: np.ndarray) -> np.ndarray:
+    """
+    j2ds_smpl: np.array de forme (B, 45, 2) ou (45,2)
+    return   : np.array de forme (B, 17, 2) ou (17,2)
+    """
+    # Gérer cas sans batch
+    batched = (j2ds_smpl.ndim == 3)
+    if not batched:
+        j2ds_smpl = j2ds_smpl[None, ...]  # (1,45,2)
+    # Sélection et reorder
+    j2ds_coco = j2ds_smpl[:, COCO17_SMPL45_INDICES, :]  # (B,17,2)
+    # Renvoyer à la forme initiale
+    return j2ds_coco[0] if not batched else j2ds_coco
+
 class TrackModel(nn.Module):
     def __init__(self, cfg, device, sat_model):
         super(TrackModel, self).__init__()
@@ -143,6 +167,48 @@ class TrackModel(nn.Module):
         # by default this will not be initialized
         self.postprocessor = Postprocessor(self.cfg, self)
     
+    def generate_mask_from_vertices(self, vertices, cam_intrinsics, frame_size, radius=5, n_samples=100_000):
+        """
+        Génère un masque binaire approximant la silhouette à partir des vertices projetés.
+
+        Args:
+            vertices (np.ndarray): (N, 3) vertices du mesh (en mètres)
+            cam_intrinsics (np.ndarray): (3, 3) matrice K de la caméra
+            frame_size (tuple): (H, W) de l’image de sortie
+            radius (int): Rayon du noyau circulaire autour de chaque point projeté
+            n_samples (int): Nombre max de points à projeter
+
+        Returns:
+            mask (np.ndarray): (H, W) uint8 mask binaire (1 = humain)
+        """
+        H, W = map(int, frame_size)
+        if vertices.shape[0] == 0:
+            return np.zeros((H, W), dtype=np.uint8)
+
+        # Sous-échantillonnage si nécessaire
+        if vertices.shape[0] > n_samples:
+            idx = np.random.choice(vertices.shape[0], n_samples, replace=False)
+            vertices = vertices[idx]
+
+        # Projection 3D -> 2D
+        K = cam_intrinsics.astype(np.float32)
+        verts_proj = vertices @ K.T
+        pts2d = verts_proj[:, :2] / (verts_proj[:, 2:] + 1e-6)
+
+        # Clipping dans l’image
+        xs = np.clip(pts2d[:, 0], 0, W - 1).astype(np.int32)
+        ys = np.clip(pts2d[:, 1], 0, H - 1).astype(np.int32)
+
+        # Création d’un masque binaire
+        mask = np.zeros((H, W), dtype=np.uint8)
+        mask[ys, xs] = 1
+
+        # Dilatation circulaire pour obtenir un corps complet
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+        mask = cv2.dilate(mask, kernel, iterations=1)
+
+        return mask
+    
     def get_croped_image(self, image, bbox, bbox_pad, seg_mask):
         
         # Encode the mask for storing, borrowed from tao dataset
@@ -174,74 +240,6 @@ class TrackModel(nn.Module):
         masked_image = torch.cat((image_tmp, mask_tmp[:1, :, :]), 0)
         
         return masked_image, center_, scale_, rles, center_pad, scale_pad
-    
-    def get_detections(self, image, sat_data, frame_name, t_, additional_data=None, measurements=None):
-        """
-        Get detections using SAT-HMR model, replacing Detectron2 mask processing.
-        
-        Args:
-            image: Input image (numpy array or PIL Image).
-            frame_name: Frame identifier.
-            t_: Time step (unused here).
-            additional_data: Optional dictionary with ground-truth data.
-            measurements: Tuple (img_height, img_width, new_image_size, left, top).
-        
-        Returns:
-            pred_bbox: Predicted bounding boxes [x1, y1, x2, y2].
-            pred_bbox: Duplicate for compatibility.
-            pred_masks: Synthetic masks.
-            pred_scores: Confidence scores.
-            pred_classes: Class IDs (0 for people).
-            ground_truth_track_id: Track IDs.
-            ground_truth_annotations: Annotations.
-            smpl_params: Optional SMPL parameters (if PHALP can use them).
-        """
-        img_height, img_width = image.shape[:2] if isinstance(image, np.ndarray) else image.size[::-1]
-        
-        # Convert outputs to Instances
-        pred_boxes = sat_data['pred_boxes'][0]  # [num_queries, 4] (center_x, center_y, w, h)
-        pred_confs = sat_data['pred_confs'][0].squeeze(-1)  # [num_queries]
-        pred_classes = torch.zeros_like(pred_confs, dtype=torch.long)  # Class 0 (person)
-        
-        # Convert boxes to [x1, y1, x2, y2]
-        cx, cy, w, h = pred_boxes[:, 0], pred_boxes[:, 1], pred_boxes[:, 2], pred_boxes[:, 3]
-        x1 = (cx - w / 2) * img_width
-        y1 = (cy - h / 2) * img_height
-        x2 = (cx + w / 2) * img_width
-        y2 = (cy + h / 2) * img_height
-        pred_boxes = torch.stack([x1, y1, x2, y2], dim=-1)
-        
-        instances = Instances((img_height, img_width))
-        instances.pred_boxes = Boxes(pred_boxes)
-        instances.scores = pred_confs
-        instances.pred_classes = pred_classes
-        instances.smpl_params = {
-            'poses': sat_data['pred_poses'][0],
-            'betas': sat_data['pred_betas'][0],
-            'j3ds': sat_data['pred_j3ds'][0],
-            'j2ds': sat_data['pred_j2ds'][0],
-            'verts': sat_data['pred_verts'][0],
-            'transl': sat_data['pred_transl'][0]
-        }
-        
-        # Filter instances for people and score threshold
-        instances_people = instances[instances.pred_classes == 0]
-        instances_people = instances_people[instances_people.scores > self.cfg.phalp.low_th_c]
-        
-        pred_bbox = instances_people.pred_boxes.tensor.cpu().numpy()
-        pred_scores = instances_people.scores.cpu().numpy()
-        pred_classes = instances_people.pred_classes.cpu().numpy()
-        smpl_params = instances_people.smpl_params
-        
-        # Generate synthetic masks
-        #pred_masks = self._generate_synthetic_masks(pred_bbox, img_height, img_width)
-        
-        pred_masks = self._generate_sam_masks(pred_bbox, image, img_height, img_width)
-
-        ground_truth_track_id = [1] * len(pred_scores)
-        ground_truth_annotations = [[]] * len(pred_scores)
-        
-        return pred_bbox, pred_bbox, pred_masks, pred_scores, pred_classes, ground_truth_track_id, ground_truth_annotations, smpl_params
 
     def _generate_synthetic_masks(self, bboxes, img_height, img_width):
         """
@@ -295,7 +293,221 @@ class TrackModel(nn.Module):
         cam_np = np.stack([scale, tx, ty], axis=1).astype(np.float32)
         return torch.from_numpy(cam_np)
 
+    @profile
     def get_human_features(self, sat_data, image, frame_name, t_, measurments, gt=None, ann=None, extra_data=None):
+        """
+        Get human features using SAT-HMR outputs directly and HMAR for appearance and UV maps.
+        
+        Args:
+            sat_data: Dictionary from SAT-HMR's forward method (pred_boxes, pred_confs, pred_poses, etc.).
+            image: Input image (numpy array or PIL Image).
+            frame_name: Frame identifier.
+            t_: Time step.
+            measurments: Tuple (img_height, img_width, new_image_size, left, top).
+            gt: Ground-truth flags (optional, default None).
+            ann: Annotations (optional, default None).
+            extra_data: Extra data (optional, default None).
+        
+        Returns:
+            detection_data_list: List of Detection objects with human features.
+        """
+        img_height, img_width, new_image_size, left, top = measurments
+        ratio = 1.0 / int(new_image_size) * self.cfg.render.res
+
+        # Extract SAT-HMR outputs (batch_size=1)
+        pred_boxes = sat_data['pred_boxes'][0]  # [num_queries, 4] (center_x, center_y, w, h)
+        pred_confs = sat_data['pred_confs'][0].squeeze(-1)  # [num_queries]
+        pred_poses = sat_data['pred_poses'][0]  # [num_queries, 72]
+        pred_betas = sat_data['pred_betas'][0]  # [num_queries, 10]
+        pred_j3ds = sat_data['pred_j3ds'][0]  # [num_queries, num_joints, 3]
+        pred_j2ds = sat_data['pred_j2ds'][0]  # [num_queries, num_joints, 2]
+        pred_transl = sat_data['pred_transl'][0]  # [num_queries, 3]
+        pred_intrinsic = sat_data['pred_intrinsics'][0]
+        pred_cam_xys = sat_data['pred_cam_xys'][0]
+
+        # Convert boxes to [x1, y1, x2, y2]
+        cx, cy, w, h = pred_boxes[:, 0], pred_boxes[:, 1], pred_boxes[:, 2], pred_boxes[:, 3]
+        x1 = (cx - w / 2) * img_width
+        y1 = (cy - h / 2) * img_height
+        x2 = (cx + w / 2) * img_width
+        y2 = (cy + h / 2) * img_height
+        pred_bbox = torch.stack([x1, y1, x2, y2], dim=-1).cpu().numpy()
+
+        # Filter detections based on score and size thresholds
+        NPEOPLE = len(pred_confs)
+        masked_image_list = []
+        center_list = []
+        scale_list = []
+        rles_list = []
+        selected_ids = []
+        bbox_pad_list = []
+        pred_classes = np.zeros(NPEOPLE, dtype=np.int64)  # Class 0 (person)
+        ground_truth_track_id = [1] * NPEOPLE  # Default track IDs
+        ground_truth_annotations = [[]] * NPEOPLE  # Default annotations
+
+        for p_ in range(NPEOPLE):
+            if pred_confs[p_] < self.cfg.phalp.low_th_c:
+                continue
+            w = pred_bbox[p_][2] - pred_bbox[p_][0]
+            h = pred_bbox[p_][3] - pred_bbox[p_][1]
+            if w < self.cfg.phalp.small_w or h < self.cfg.phalp.small_h:
+                continue
+            
+            # Generate mask using vertex-based method
+            verts = sat_data['pred_verts'][0][p_].reshape(-1, 3).cpu().numpy()
+            K = sat_data['pred_intrinsics'][0].reshape(3, 3).detach().cpu().numpy()
+            mask = self.generate_mask_from_vertices(verts, K, (img_height, img_width))  # No [0] needed, as it returns (H, W)
+            
+            if mask is None:
+                print(f"[INFO] Aucun masque généré pour la bbox {p_}, on passe.")
+                continue
+
+            # Encode mask to RLE for storage
+            rle = mask_utils.encode(np.asfortranarray(mask.astype(np.uint8)))
+            rle['counts'] = rle['counts'].decode('utf-8')
+
+            # Compute center, scale, and bbox with padding
+            center = np.array([(pred_bbox[p_][0] + pred_bbox[p_][2]) / 2, (pred_bbox[p_][1] + pred_bbox[p_][3]) / 2])
+            scale = np.array([w, h]) / self.cfg.render.res
+            bbox = pred_bbox[p_]
+            bbox_pad = np.array([bbox[0] - w * 0.125, bbox[1] - h * 0.125, bbox[2] + w * 0.125, bbox[3] + h * 0.125])
+            bbox_pad_list.append(bbox_pad)
+
+            # Get cropped image and information
+            masked_image, center_, scale_, rles, center_pad, scale_pad = self.get_croped_image(image, bbox, bbox_pad, mask)
+            if masked_image is None:
+                print(f"[INFO] Échec de get_croped_image pour la bbox {p_}, on passe.")
+                continue
+
+            masked_image_list.append(masked_image)
+            center_list.append(center_pad)
+            scale_list.append(scale_pad)
+            rles_list.append(rle)  # Store RLE instead of binary mask
+            selected_ids.append(p_)
+
+        if len(selected_ids) == 0:
+            return []
+
+        BS = len(selected_ids)
+        
+        # Run HMAR for appearance and UV maps
+        if BS > 0:
+            masked_image_list = torch.stack(masked_image_list, dim=0)
+            with torch.no_grad():
+                extra_args = {}
+                hmar_out = self.HMAR(masked_image_list.cuda(), **extra_args)
+                uv_vector = hmar_out['uv_vector']  # [BS, 256, 256, 3]
+                appe_embedding = self.HMAR.autoencoder_hmar(uv_vector, en=True)  # [BS, embedding_dim]
+                appe_embedding = appe_embedding.view(appe_embedding.shape[0], -1)
+        else:
+            uv_vector = np.zeros((BS, 256, 256, 3))
+            appe_embedding = torch.zeros(BS, 512)  # Dummy embedding
+
+        # Prepare SMPL parameters and joints from SAT-HMR
+        pred_cam_tensor = pred_transl[selected_ids]  # (BS, 3) – torch.Tensor
+        pred_smpl_params = []
+        for idx in selected_ids:
+            aa        = pred_poses[idx]            # (72,)
+            global_aa = aa[:3].unsqueeze(0)        # (1,3)
+            body_aa   = aa[3:].view(-1,3)          # (23,3)
+
+            # axis-angle → rotmat
+            global_rot = batch_rodrigues(global_aa)[0].cpu().numpy()   # (3,3)
+            body_rot   = batch_rodrigues(body_aa).cpu().numpy()       # (23,3,3)
+
+            pred_smpl_params.append({
+                'global_orient': global_rot[None, ...],  # (1,3,3)
+                'body_pose'    : body_rot,               # (23,3,3)
+                'betas'        : pred_betas[idx].cpu().numpy()  # (10,)
+            })
+        
+        pred_cam_np = self.transl3d_to_weak_cam(pred_cam_tensor.cpu().numpy())  # (BS,3) array
+
+        pred_joints_3d = pred_j3ds[selected_ids].cpu().numpy()  # [BS, num_joints, 3]
+        pred_joints_2d = pred_j2ds[selected_ids].cpu().numpy()  # [BS, num_joints, 2]
+        
+        j2ds_smpl = pred_j2ds[selected_ids].cpu().numpy()  # [BS, 45, 2]
+        # convertis en 17 keypoints COCO
+        j2ds_coco = smpl45_to_coco17(j2ds_smpl)            # [BS, 17, 2]
+
+        pred_cam = pred_transl[selected_ids].cpu().numpy()  # [BS, 3]
+        pred_cam_weak = []
+        
+        # Compute pose embedding
+        if self.cfg.phalp.pose_distance == "joints":
+            pose_embedding = torch.from_numpy(pred_joints_3d).view(BS, -1)
+        elif self.cfg.phalp.pose_distance == "smpl":
+            pose_embedding_list = []
+            for i in range(BS):
+                pred_cam_weak.append(pred_cam_np[i])
+                emb_np = smpl_to_pose_camera_vector(
+                    pred_smpl_params[i],      # dict avec rotmats + betas
+                    pred_cam_np[i]            # [scale, tx, ty]
+                )
+                pose_embedding_list.append(torch.from_numpy(emb_np[0]))
+            pose_embedding = torch.stack(pose_embedding_list, dim=0)
+        else:
+            raise ValueError("Unknown pose distance")
+        
+        # Compute location embedding
+        pred_joints_2d_ = pred_joints_2d.reshape(BS, -1) / self.cfg.render.res
+        pred_cam_ = pred_cam.reshape(BS, -1)
+        loca_embedding = torch.cat((torch.from_numpy(pred_joints_2d_), torch.from_numpy(pred_cam_),
+                                    torch.from_numpy(pred_cam_), torch.from_numpy(pred_cam_)), dim=1)
+
+        # Compute full embedding (for legacy)
+        full_embedding = torch.cat((appe_embedding.cpu(), pose_embedding, loca_embedding), dim=1)
+        
+        # Create detection data list
+        detection_data_list = []
+        all_masks = {idx: rles_list[i] for i, idx in enumerate(selected_ids)}  # Store RLEs in all_masks
+        for i, p_ in enumerate(selected_ids):
+            # Generate global mask for visibility (decode RLEs)
+            joints_2d = j2ds_coco[i]
+            keypoints = []
+            for j in range(joints_2d.shape[0]):
+                x, y = joints_2d[j]
+                if 0 <= x < img_width and 0 <= y < img_height:
+                    vi = 1
+                else:
+                    vi = 0
+                
+                keypoints.extend([x, y, vi])
+            print(len(keypoints)/3)
+            detection_data = {
+                "bbox": np.array([pred_bbox[p_][0], pred_bbox[p_][1],
+                                pred_bbox[p_][2] - pred_bbox[p_][0], pred_bbox[p_][3] - pred_bbox[p_][1]]),
+                "mask": rles_list[i],  # Store RLE instead of binary mask
+                "conf": pred_confs[p_].cpu().numpy(),
+                "appe": appe_embedding[i].cpu().numpy(),
+                "pose": pose_embedding[i].numpy(),
+                "loca": loca_embedding[i].numpy(),
+                "uv": uv_vector[i],
+                "embedding": full_embedding[i].numpy(),
+                "center": center_list[i] + np.array([left, top]) * ratio,
+                "scale": scale_list[i] * ratio,
+                "smpl": pred_smpl_params[i],
+                "camera": pred_cam_[i],
+                "camera_bbox": pred_cam_[i],
+                "pred_intrinsic": pred_intrinsic,
+                "pred_cam_xys": pred_cam_xys,
+                "3d_joints": pred_joints_3d[i],
+                "2d_joints": pred_joints_2d_[i],
+                "size": [img_height, img_width],
+                "img_path": frame_name,
+                "img_name": frame_name.split('/')[-1] if isinstance(frame_name, str) else None,
+                "class_name": pred_classes[p_],
+                "time": t_,
+                "ground_truth": gt[p_] if gt is not None else ground_truth_track_id[p_],
+                "annotations": ann[p_] if ann is not None else ground_truth_annotations[p_],
+                "extra_data": extra_data[p_] if extra_data is not None else None,
+                "keypoints": keypoints  # Keep new feature
+            }
+            detection_data_list.append(Detection(detection_data))
+
+        return detection_data_list
+    @profile
+    def _get_human_features(self, sat_data, image, frame_name, t_, measurments, gt=None, ann=None, extra_data=None):
         """
         Get human features using SAT-HMR outputs directly and HMAR for appearance and UV maps.
         
@@ -439,9 +651,26 @@ class TrackModel(nn.Module):
         # Compute full embedding (for legacy)
         full_embedding = torch.cat((appe_embedding.cpu(), pose_embedding, loca_embedding), dim=1)
         
+        j2ds_smpl = pred_j2ds[selected_ids].cpu().numpy()  # [BS, 45, 2]
+        # convertis en 17 keypoints COCO
+        j2ds_coco = smpl45_to_coco17(j2ds_smpl)            # [BS, 17, 2]
+
         # Create detection data list
         detection_data_list = []
         for i, p_ in enumerate(selected_ids):
+            joints_2d = j2ds_coco[i]
+            keypoints = []
+            count_out = 0
+            for j in range(joints_2d.shape[0]):
+                x, y = joints_2d[j]
+                if 0 <= x < img_width and 0 <= y < img_height:
+                    vi = 1
+                else:
+                    vi = 0
+                    count_out += 1
+                keypoints.extend([x, y, vi])
+            if count_out > 7:
+                print(keypoints)
             detection_data = {
                 "bbox": np.array([pred_bbox[p_][0], pred_bbox[p_][1],
                                 pred_bbox[p_][2] - pred_bbox[p_][0], pred_bbox[p_][3] - pred_bbox[p_][1]]),

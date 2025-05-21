@@ -108,6 +108,7 @@ class Engine:
             writer.release()
         print(f"[Writer] Total frames written: {n_frames_written}")
 
+    @profile
     def _process_frame(self, frame, frame_id, input_size, conf_thresh, display):
         h, w = frame.shape[:2]
         transform = get_transform(input_size=input_size, orig_h=h, orig_w=w, device=self.device)
@@ -141,12 +142,12 @@ class Engine:
             if len(history) > 3:
                 hist_pose[tid] = history[-3]['3d_joints']
 
-        diag_hist = compute_persistence_diagrams(hist_pose)
-        diag_detec = compute_persistence_diagrams(detec_pose)
-        dist_mat = compute_cross_distance_matrix(list(diag_hist.values()), list(diag_detec.values()), epsilon=0.0)
+        #diag_hist = compute_persistence_diagrams(hist_pose)
+        #diag_detec = compute_persistence_diagrams(detec_pose)
+        #dist_mat = compute_cross_distance_matrix(list(diag_hist.values()), list(diag_detec.values()), epsilon=0.0)
 
-        heatmap = generate_heatmap_image(dist_mat, list(diag_hist.keys()), list(diag_detec.keys()))
-        diagram_img = generate_persistence_diagram_image(diag_detec, self.phalp_tracker.color_dict)
+        #heatmap = generate_heatmap_image(dist_mat, list(diag_hist.keys()), list(diag_detec.keys()))
+        #diagram_img = generate_persistence_diagram_image(diag_detec, self.phalp_tracker.color_dict)
 
         confs = outputs['pred_confs'][0].view(-1)
         if (mask := confs > conf_thresh).any():
@@ -154,11 +155,12 @@ class Engine:
             frame = vis_vertices_img(frame, verts, K, (w, h))
             frame = vis_vertices_img_with_tracked_pose(frame, detec_pose, K, (w,h), self.phalp_tracker.color_dict)
 
-        frame = add_left_border_to_frame(frame, 500, (1,1,1))
-        frame, hmap_h = overlay_heatmap_on_frame(frame, heatmap, position=(10,10), alpha=0.7, brightness_factor=1.5, size_factor=1.5)
-        final = overlay_diagram_on_frame(frame, diagram_img, position=(10,10), alpha=0.7, brightness_factor=1.5, size_factor=1.5, heatmap_height=hmap_h)
-        return final
-
+        #frame = add_left_border_to_frame(frame, 500, (1,1,1))
+        #frame, hmap_h = overlay_heatmap_on_frame(frame, heatmap, position=(10,10), alpha=0.7, brightness_factor=1.5, size_factor=1.5)
+        #final = overlay_diagram_on_frame(frame, diagram_img, position=(10,10), alpha=0.7, brightness_factor=1.5, size_factor=1.5, heatmap_height=hmap_h)
+        return frame
+    
+    @profile
     def infer_video(self, input_video, output_video, input_size, conf_thresh, display=False):
         cap = cv2.VideoCapture(input_video)
         if not cap.isOpened():
@@ -192,6 +194,9 @@ class Engine:
                 cv2.imshow('Output', processed)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
+            
+            if frame_count == 20:
+                break
 
         result_queue.put(None)
         writer.join()
