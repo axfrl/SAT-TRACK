@@ -117,7 +117,8 @@ class Engine:
             tensor = tensor.half()
 
         with torch.no_grad():
-            outputs = self.model(tensor, create_empty_targets(self.device, [h, w]))
+            with torch.amp.autocast(device_type="cuda"):
+                outputs = self.model(tensor, create_empty_targets(self.device, [h, w]))
 
         pad_h, pad_w = input_size - h, input_size - w
         left, top = pad_w // 2, pad_h // 2
@@ -194,9 +195,6 @@ class Engine:
                 cv2.imshow('Output', processed)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
-            
-            if frame_count == 20:
-                break
 
         result_queue.put(None)
         writer.join()

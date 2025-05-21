@@ -209,6 +209,157 @@ class TrackModel(nn.Module):
 
         return mask
     
+    @profile
+    def get_croped_image(self, image, bbox, bbox_pad, seg_mask, output_size=256):
+        """
+        GPU-native cropping + normalisation + concat mask
+        Inputs:
+        - image:   H×W×3 numpy uint8 BGR ou torch.uint8 tensor BGR
+        - seg_mask: H×W numpy bool/uint8 ou torch tensor (0/1)
+        - bbox, bbox_pad: listes [x0,y0,x1,y1] en pixels
+        - output_size: int, taille carrée de sortie
+        Returns:
+        - masked_image: torch.FloatTensor (4×output_size×output_size) sur GPU
+        - center_, scale_, rles, center_pad, scale_pad (comme avant)
+        """
+
+        # --- 1) RLE encoding (reste CPU & numpy) ---
+        masks_decoded = np.array(np.expand_dims(seg_mask, 2), order='F', dtype=np.uint8)
+        rles = mask_utils.encode(masks_decoded)
+        for r in rles:
+            r["counts"] = r["counts"].decode("utf-8")
+
+        # --- 2) Prépare les tenseurs et device ---
+        device = torch.device("cuda")
+        # image → float32 [0,1], BGR→RGB si besoin, shape 1×3×H×W
+        if isinstance(image, np.ndarray):
+            img_t = torch.from_numpy(image).permute(2,0,1).unsqueeze(0).to(device).float() / 255.0
+        else:
+            img_t = image.to(device).permute(0,3,1,2).float() if image.ndim==4 else image.permute(2,0,1).unsqueeze(0).to(device).float()/255.0
+
+        # seg_mask → float32 [0,1], shape 1×1×H×W
+        if isinstance(seg_mask, np.ndarray):
+            m_t = torch.from_numpy(seg_mask.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
+        else:
+            m_t = seg_mask.to(device).unsqueeze(0).unsqueeze(0).float()
+
+        B, C, H, W = img_t.shape
+
+        # --- 3) Calcul des centres et échelles ---
+        center_pad = np.array([ (bbox_pad[0]+bbox_pad[2])/2, (bbox_pad[1]+bbox_pad[3])/2 ])
+        scale_pad  = np.array([ bbox_pad[2]-bbox_pad[0],   bbox_pad[3]-bbox_pad[1] ])
+        s = max(scale_pad)
+
+        cx, cy = center_pad
+        # Normalisation pour affine_grid (coords dans [-1,1])
+        # scale_x = (bbox_pad_width) / W, translate_x = (2*cx/W -1)
+        scale_x = scale_pad[0] / W
+        scale_y = scale_pad[1] / H
+        trans_x = 2 * (cx / W) - 1
+        trans_y = 2 * (cy / H) - 1
+
+        # Theta pour affine_grid : shape B×2×3
+        theta = torch.tensor([[
+            [ scale_x,     0.0, trans_x ],
+            [    0.0, scale_y, trans_y ]
+        ]], dtype=torch.float32, device=device)
+
+        # --- 4) Génération de la grille et application ---
+        grid = F.affine_grid(theta, size=(B, C, output_size, output_size), align_corners=False)
+        img_crop = F.grid_sample(img_t,  grid, mode='bilinear',   padding_mode='zeros', align_corners=False)
+        # pour le mask on réutilise la même grille
+        m_crop   = F.grid_sample(m_t,   grid, mode='nearest',    padding_mode='zeros', align_corners=False)
+
+        # --- 5) Normalisation image (au format ImageNet) ---
+        # Les moyennes/std sont divisées par 255 pour rester sur [0,1]
+        mean = torch.tensor([123.675, 116.280, 103.530], device=device) / 255.0
+        std  = torch.tensor([ 58.395,  57.120,  57.375], device=device) / 255.0
+        img_norm = (img_crop - mean[None,:,None,None]) / std[None,:,None,None]
+
+        # --- 6) Concat image + mask ---
+        # mask est 1×1×H×W, on garde ce canal unique
+        masked_image = torch.cat([img_norm, m_crop], dim=1).squeeze(0)
+        # masked_image : (4, output_size, output_size)
+
+        # --- 7) Calcule center/scale original pour retourner ---
+        center_ = np.array([ (bbox[0]+bbox[2])/2, (bbox[1]+bbox[3])/2 ])
+        scale_  = np.array([ bbox[2]-bbox[0],     bbox[3]-bbox[1] ])
+
+        return masked_image, center_, scale_, rles, center_pad, scale_pad
+
+    @profile
+    def _get_croped_image(self, image, bbox, bbox_pad, seg_mask, output_size=256):
+        """
+        Args:
+            image:      H×W×3 (BGR uint8)
+            bbox:       [x0, y0, x1, y1] - sans padding
+            bbox_pad:   [x0, y0, x1, y1] - avec padding
+            seg_mask:   H×W (bool ou uint8)
+            output_size: taille du carré en sortie (par défaut 256)
+
+        Returns:
+            masked_image: Tensor C×H×W (3 canaux image + 1 canal masque)
+            center_:      centre du bbox original
+            scale_:       échelle du bbox original
+            rles:         encodage COCO du masque
+            center_pad:   centre du bbox_pad
+            scale_pad:    échelle du bbox_pad
+        """
+
+        # Encode mask (comme dans TAO)
+        masks_decoded = np.array(np.expand_dims(seg_mask, 2), order='F', dtype=np.uint8)
+        rles = mask_utils.encode(masks_decoded)
+        for rle in rles:
+            rle["counts"] = rle["counts"].decode("utf-8")
+
+        # Ensure seg_mask is 3-channel uint8
+        if seg_mask.dtype != np.uint8:
+            seg_mask = (seg_mask > 0).astype(np.uint8) * 255
+        if len(seg_mask.shape) == 2:
+            seg_mask = cv2.cvtColor(seg_mask, cv2.COLOR_GRAY2BGR)
+
+        # Centres et échelles
+        center_ = np.array([(bbox[2] + bbox[0]) / 2, (bbox[3] + bbox[1]) / 2])
+        scale_  = np.array([(bbox[2] - bbox[0]),     (bbox[3] - bbox[1])])
+
+        center_pad = np.array([(bbox_pad[2] + bbox_pad[0]) / 2, (bbox_pad[3] + bbox_pad[1]) / 2])
+        scale_pad  = np.array([(bbox_pad[2] - bbox_pad[0]),     (bbox_pad[3] - bbox_pad[1])])
+
+        # Transformation affine
+        def get_affine_transform(center, scale, out_res):
+            s = max(scale)
+            src = np.array([
+                [center[0] - s/2, center[1] - s/2],
+                [center[0] - s/2, center[1] + s/2],
+                [center[0] + s/2, center[1] - s/2]
+            ], dtype=np.float32)
+            dst = np.array([
+                [0, 0],
+                [0, out_res - 1],
+                [out_res - 1, 0]
+            ], dtype=np.float32)
+            return cv2.getAffineTransform(src, dst)
+
+        M = get_affine_transform(center_pad, scale_pad, output_size)
+
+        # Image crop et normalisation
+        cropped_img = cv2.warpAffine(image, M, (output_size, output_size), flags=cv2.INTER_LINEAR)
+        cropped_mask = cv2.warpAffine(seg_mask, M, (output_size, output_size), flags=cv2.INTER_NEAREST)
+
+        # Normalisation image
+        mean = np.array([123.675, 116.280, 103.530], dtype=np.float32)
+        std  = np.array([ 58.395,  57.120,  57.375], dtype=np.float32)
+        img_f = cropped_img.astype(np.float32)
+        img_f = (img_f - mean[None, None, :]) / std[None, None, :]
+
+        # Passage en tensor
+        image_tmp = torch.from_numpy(img_f.transpose(2, 0, 1))  # CxHxW
+        mask_tmp = torch.from_numpy(cropped_mask.astype(np.float32).transpose(2, 0, 1))  # 3xHxW
+        masked_image = torch.cat((image_tmp, mask_tmp[:1, :, :]), dim=0)
+
+        return masked_image, center_, scale_, rles, center_pad, scale_pad
+
+    @profile
     def _get_croped_image(self, image, bbox, bbox_pad, seg_mask):
         
         # Encode the mask for storing, borrowed from tao dataset
@@ -217,11 +368,12 @@ class TrackModel(nn.Module):
         rles = mask_utils.encode(masks_decoded)
         for rle in rles: 
             rle["counts"] = rle["counts"].decode("utf-8")
-            
-        seg_mask = seg_mask.astype(int)*255
-        if(len(seg_mask.shape)==2):
-            seg_mask = np.expand_dims(seg_mask, 2)
-            seg_mask = np.repeat(seg_mask, 3, 2)
+        
+        if seg_mask.dtype != np.uint8:
+            seg_mask = (seg_mask > 0).astype(np.uint8) * 255
+
+        if len(seg_mask.shape) == 2:
+            seg_mask = cv2.cvtColor(seg_mask, cv2.COLOR_GRAY2BGR)
         
         center_      = np.array([(bbox[2] + bbox[0])/2, (bbox[3] + bbox[1])/2])
         scale_       = np.array([(bbox[2] - bbox[0]), (bbox[3] - bbox[1])])
@@ -241,62 +393,6 @@ class TrackModel(nn.Module):
         
         return masked_image, center_, scale_, rles, center_pad, scale_pad
 
-    def get_cropped_image(self, image_tensor, bbox, bbox_pad, mask):
-        """
-        Crop and process an image and mask using GPU-based operations.
-        
-        Args:
-            image_tensor: Input image tensor [C, H, W] on GPU.
-            bbox: Bounding box [x1, y1, x2, y2] as a torch.Tensor on GPU.
-            bbox_pad: Padded bounding box [x1, y1, x2, y2] as a torch.Tensor on GPU.
-            mask: Segmentation mask (H, W) as a numpy array on CPU.
-            device: Device to use ('cuda' or 'cpu').
-        
-        Returns:
-            masked_image: Cropped and processed image tensor [C+1, H', W'].
-            center: Center of original bbox [2] (numpy).
-            scale: Scale of original bbox [2] (numpy).
-            rles: RLE-encoded mask (list).
-            center_pad: Center of padded bbox [2] (numpy).
-            scale_pad: Scale of padded bbox [2] (numpy).
-        """
-        # Convertir le masque en tenseur et le déplacer sur GPU
-        mask_tensor = torch.from_numpy(mask).float().to(self.device)
-
-        # Préparer le masque (multiplier par 255 et gérer les dimensions)
-        mask_tensor = (mask_tensor * 255).to(torch.uint8)
-        if len(mask_tensor.shape) == 2:
-            mask_tensor = mask_tensor.unsqueeze(2).repeat(1, 1, 3)  # [H, W, 3]
-
-        # Calculer centre et échelle pour la bbox originale
-        center = (bbox[:2] + bbox[2:]) / 2  # [x, y]
-        scale = bbox[2:] - bbox[:2]         # [w, h]
-
-        # Calculer centre et échelle pour la bbox avec padding
-        center_pad = (bbox_pad[:2] + bbox_pad[2:]) / 2
-        scale_pad = bbox_pad[2:] - bbox_pad[:2]
-
-        # Appliquer process_mask et process_image (supposés compatibles GPU)
-        mask_tmp = process_mask_torch(mask_tensor, center_pad, 1.0 * scale_pad.max())
-        image_tmp = process_image_torch(image_tensor, center_pad, 1.0 * scale_pad.max())
-
-        # Concaténer image et masque
-        masked_image = torch.cat((image_tmp, mask_tmp[:1, :, :]), dim=0)
-
-        # Encoder le masque en RLE (nécessite CPU)
-        masks_decoded = np.array(np.expand_dims(mask, 2), order='F', dtype=np.uint8)
-        rles = mask_utils.encode(masks_decoded)
-        for rle in rles:
-            rle["counts"] = rle["counts"].decode("utf-8")
-
-        # Retourner les résultats (centres et échelles sur CPU pour compatibilité)
-        return (masked_image, 
-                center.cpu().numpy(), 
-                scale.cpu().numpy(), 
-                rles, 
-                center_pad.cpu().numpy(), 
-                scale_pad.cpu().numpy())
-    
     def _generate_synthetic_masks(self, bboxes, img_height, img_width):
         """
         Generate synthetic binary masks from bounding boxes.
@@ -351,219 +447,6 @@ class TrackModel(nn.Module):
 
     @profile
     def get_human_features(self, sat_data, image, frame_name, t_, measurments, gt=None, ann=None, extra_data=None):
-        """
-        Get human features using SAT-HMR outputs directly and HMAR for appearance and UV maps.
-        
-        Args:
-            sat_data: Dictionary from SAT-HMR's forward method (pred_boxes, pred_confs, pred_poses, etc.).
-            image: Input image (numpy array or PIL Image).
-            frame_name: Frame identifier.
-            t_: Time step.
-            measurments: Tuple (img_height, img_width, new_image_size, left, top).
-            gt: Ground-truth flags (optional, default None).
-            ann: Annotations (optional, default None).
-            extra_data: Extra data (optional, default None).
-        
-        Returns:
-            detection_data_list: List of Detection objects with human features.
-        """
-        img_height, img_width, new_image_size, left, top = measurments
-        ratio = 1.0 / int(new_image_size) * self.cfg.render.res
-
-        # Extract SAT-HMR outputs (batch_size=1)
-        pred_boxes = sat_data['pred_boxes'][0]  # [num_queries, 4] (center_x, center_y, w, h)
-        pred_confs = sat_data['pred_confs'][0].squeeze(-1)  # [num_queries]
-        pred_poses = sat_data['pred_poses'][0]  # [num_queries, 72]
-        pred_betas = sat_data['pred_betas'][0]  # [num_queries, 10]
-        pred_j3ds = sat_data['pred_j3ds'][0]  # [num_queries, num_joints, 3]
-        pred_j2ds = sat_data['pred_j2ds'][0]  # [num_queries, num_joints, 2]
-        pred_transl = sat_data['pred_transl'][0]  # [num_queries, 3]
-        pred_intrinsic = sat_data['pred_intrinsics'][0]
-        pred_cam_xys = sat_data['pred_cam_xys'][0]
-
-        # Convert boxes to [x1, y1, x2, y2]
-        cx, cy, w, h = pred_boxes[:, 0], pred_boxes[:, 1], pred_boxes[:, 2], pred_boxes[:, 3]
-        x1 = (cx - w / 2) * img_width
-        y1 = (cy - h / 2) * img_height
-        x2 = (cx + w / 2) * img_width
-        y2 = (cy + h / 2) * img_height
-        pred_bbox = torch.stack([x1, y1, x2, y2], dim=-1).cpu().numpy()
-
-        # Filter detections based on score and size thresholds
-        NPEOPLE = len(pred_confs)
-        masked_image_list = []
-        center_list = []
-        scale_list = []
-        rles_list = []
-        selected_ids = []
-        bbox_pad_list = []
-        pred_classes = np.zeros(NPEOPLE, dtype=np.int64)  # Class 0 (person)
-        ground_truth_track_id = [1] * NPEOPLE  # Default track IDs
-        ground_truth_annotations = [[]] * NPEOPLE  # Default annotations
-
-        for p_ in range(NPEOPLE):
-            if pred_confs[p_] < self.cfg.phalp.low_th_c:
-                continue
-            w = pred_bbox[p_][2] - pred_bbox[p_][0]
-            h = pred_bbox[p_][3] - pred_bbox[p_][1]
-            if w < self.cfg.phalp.small_w or h < self.cfg.phalp.small_h:
-                continue
-            
-            # Generate mask using vertex-based method
-            verts = sat_data['pred_verts'][0][p_].reshape(-1, 3).cpu().numpy()
-            K = sat_data['pred_intrinsics'][0].reshape(3, 3).detach().cpu().numpy()
-            mask = self.generate_mask_from_vertices(verts, K, (img_height, img_width))  # No [0] needed, as it returns (H, W)
-            
-            if mask is None:
-                print(f"[INFO] Aucun masque généré pour la bbox {p_}, on passe.")
-                continue
-
-            # Encode mask to RLE for storage
-            rle = mask_utils.encode(np.asfortranarray(mask.astype(np.uint8)))
-            rle['counts'] = rle['counts'].decode('utf-8')
-
-            # Compute center, scale, and bbox with padding
-            center = np.array([(pred_bbox[p_][0] + pred_bbox[p_][2]) / 2, (pred_bbox[p_][1] + pred_bbox[p_][3]) / 2])
-            scale = np.array([w, h]) / self.cfg.render.res
-            bbox = pred_bbox[p_]
-            bbox_pad = np.array([bbox[0] - w * 0.125, bbox[1] - h * 0.125, bbox[2] + w * 0.125, bbox[3] + h * 0.125])
-            bbox_pad_list.append(bbox_pad)
-
-            # Get cropped image and information
-            masked_image, center_, scale_, rles, center_pad, scale_pad = self.get_croped_image(image, bbox, bbox_pad, mask)
-            if masked_image is None:
-                print(f"[INFO] Échec de get_croped_image pour la bbox {p_}, on passe.")
-                continue
-
-            masked_image_list.append(masked_image)
-            center_list.append(center_pad)
-            scale_list.append(scale_pad)
-            rles_list.append(rle)  # Store RLE instead of binary mask
-            selected_ids.append(p_)
-
-        if len(selected_ids) == 0:
-            return []
-
-        BS = len(selected_ids)
-        
-        # Run HMAR for appearance and UV maps
-        if BS > 0:
-            masked_image_list = torch.stack(masked_image_list, dim=0)
-            with torch.no_grad():
-                extra_args = {}
-                hmar_out = self.HMAR(masked_image_list.cuda(), **extra_args)
-                uv_vector = hmar_out['uv_vector']  # [BS, 256, 256, 3]
-                appe_embedding = self.HMAR.autoencoder_hmar(uv_vector, en=True)  # [BS, embedding_dim]
-                appe_embedding = appe_embedding.view(appe_embedding.shape[0], -1)
-        else:
-            uv_vector = np.zeros((BS, 256, 256, 3))
-            appe_embedding = torch.zeros(BS, 512)  # Dummy embedding
-
-        # Prepare SMPL parameters and joints from SAT-HMR
-        pred_cam_tensor = pred_transl[selected_ids]  # (BS, 3) – torch.Tensor
-        pred_smpl_params = []
-        for idx in selected_ids:
-            aa        = pred_poses[idx]            # (72,)
-            global_aa = aa[:3].unsqueeze(0)        # (1,3)
-            body_aa   = aa[3:].view(-1,3)          # (23,3)
-
-            # axis-angle → rotmat
-            global_rot = batch_rodrigues(global_aa)[0].cpu().numpy()   # (3,3)
-            body_rot   = batch_rodrigues(body_aa).cpu().numpy()       # (23,3,3)
-
-            pred_smpl_params.append({
-                'global_orient': global_rot[None, ...],  # (1,3,3)
-                'body_pose'    : body_rot,               # (23,3,3)
-                'betas'        : pred_betas[idx].cpu().numpy()  # (10,)
-            })
-        
-        pred_cam_np = self.transl3d_to_weak_cam(pred_cam_tensor.cpu().numpy())  # (BS,3) array
-
-        pred_joints_3d = pred_j3ds[selected_ids].cpu().numpy()  # [BS, num_joints, 3]
-        pred_joints_2d = pred_j2ds[selected_ids].cpu().numpy()  # [BS, num_joints, 2]
-        
-        j2ds_smpl = pred_j2ds[selected_ids].cpu().numpy()  # [BS, 45, 2]
-        # convertis en 17 keypoints COCO
-        j2ds_coco = smpl45_to_coco17(j2ds_smpl)            # [BS, 17, 2]
-
-        pred_cam = pred_transl[selected_ids].cpu().numpy()  # [BS, 3]
-        pred_cam_weak = []
-        
-        # Compute pose embedding
-        if self.cfg.phalp.pose_distance == "joints":
-            pose_embedding = torch.from_numpy(pred_joints_3d).view(BS, -1)
-        elif self.cfg.phalp.pose_distance == "smpl":
-            pose_embedding_list = []
-            for i in range(BS):
-                pred_cam_weak.append(pred_cam_np[i])
-                emb_np = smpl_to_pose_camera_vector(
-                    pred_smpl_params[i],      # dict avec rotmats + betas
-                    pred_cam_np[i]            # [scale, tx, ty]
-                )
-                pose_embedding_list.append(torch.from_numpy(emb_np[0]))
-            pose_embedding = torch.stack(pose_embedding_list, dim=0)
-        else:
-            raise ValueError("Unknown pose distance")
-        
-        # Compute location embedding
-        pred_joints_2d_ = pred_joints_2d.reshape(BS, -1) / self.cfg.render.res
-        pred_cam_ = pred_cam.reshape(BS, -1)
-        loca_embedding = torch.cat((torch.from_numpy(pred_joints_2d_), torch.from_numpy(pred_cam_),
-                                    torch.from_numpy(pred_cam_), torch.from_numpy(pred_cam_)), dim=1)
-
-        # Compute full embedding (for legacy)
-        full_embedding = torch.cat((appe_embedding.cpu(), pose_embedding, loca_embedding), dim=1)
-        
-        # Create detection data list
-        detection_data_list = []
-        all_masks = {idx: rles_list[i] for i, idx in enumerate(selected_ids)}  # Store RLEs in all_masks
-        for i, p_ in enumerate(selected_ids):
-            # Generate global mask for visibility (decode RLEs)
-            joints_2d = j2ds_coco[i]
-            keypoints = []
-            for j in range(joints_2d.shape[0]):
-                x, y = joints_2d[j]
-                if 0 <= x < img_width and 0 <= y < img_height:
-                    vi = 1
-                else:
-                    vi = 0
-                
-                keypoints.extend([x, y, vi])
-            print(len(keypoints)/3)
-            detection_data = {
-                "bbox": np.array([pred_bbox[p_][0], pred_bbox[p_][1],
-                                pred_bbox[p_][2] - pred_bbox[p_][0], pred_bbox[p_][3] - pred_bbox[p_][1]]),
-                "mask": rles_list[i],  # Store RLE instead of binary mask
-                "conf": pred_confs[p_].cpu().numpy(),
-                "appe": appe_embedding[i].cpu().numpy(),
-                "pose": pose_embedding[i].numpy(),
-                "loca": loca_embedding[i].numpy(),
-                "uv": uv_vector[i],
-                "embedding": full_embedding[i].numpy(),
-                "center": center_list[i] + np.array([left, top]) * ratio,
-                "scale": scale_list[i] * ratio,
-                "smpl": pred_smpl_params[i],
-                "camera": pred_cam_[i],
-                "camera_bbox": pred_cam_[i],
-                "pred_intrinsic": pred_intrinsic,
-                "pred_cam_xys": pred_cam_xys,
-                "3d_joints": pred_joints_3d[i],
-                "2d_joints": pred_joints_2d_[i],
-                "size": [img_height, img_width],
-                "img_path": frame_name,
-                "img_name": frame_name.split('/')[-1] if isinstance(frame_name, str) else None,
-                "class_name": pred_classes[p_],
-                "time": t_,
-                "ground_truth": gt[p_] if gt is not None else ground_truth_track_id[p_],
-                "annotations": ann[p_] if ann is not None else ground_truth_annotations[p_],
-                "extra_data": extra_data[p_] if extra_data is not None else None,
-                "keypoints": keypoints  # Keep new feature
-            }
-            detection_data_list.append(Detection(detection_data))
-
-        return detection_data_list
-    @profile
-    def _get_human_features(self, sat_data, image, frame_name, t_, measurments, gt=None, ann=None, extra_data=None):
         """
         Get human features using SAT-HMR outputs directly and HMAR for appearance and UV maps.
         
