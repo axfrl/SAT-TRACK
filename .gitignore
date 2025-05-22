@@ -10,3 +10,4 @@ tmps/
 **/__pycache__/
 datasets_visualization/
 demo_results/
+eval_result

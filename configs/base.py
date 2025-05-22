@@ -29,7 +29,7 @@ class PHALPConfig:
     low_th_c: float = 0.2
     hungarian_th: float = 100.0
     track_history: int = 7
-    max_age_track: int = 50
+    max_age_track: int = 100
     n_init: int = 5
     encode_type: str = '4c'
     past_lookback: int = 1

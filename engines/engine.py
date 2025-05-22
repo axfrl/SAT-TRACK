@@ -10,6 +10,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from tqdm import tqdm
+from torch.multiprocessing import Pool, Process, set_start_method
+try:
+     set_start_method('spawn')
+except RuntimeError:
+    pass
 
 import json
 from glob import glob
@@ -30,6 +35,31 @@ from topology.persistence_analysis import (
     compute_cross_distance_matrix
 )
 from utils.utils import pose_camera_vector_to_smpl, smpl_to_pred_pose_shape
+
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import numpy as np
+
+def display_bbox(image, bbox, box_color='red', linewidth=2):
+    """
+    Affiche une image avec une boîte englobante au format COCO.
+
+    Args:
+        image (np.ndarray): Image en format H x W x 3 (uint8 ou float)
+        bbox (list or tuple): Bounding box [x_min, y_min, width, height]
+        box_color (str): Couleur de la boîte (default: 'red')
+        linewidth (int): Épaisseur du trait (default: 2)
+    """
+    fig, ax = plt.subplots(1)
+    ax.imshow(image)
+
+    # Créer un rectangle pour la bounding box
+    x, y, w, h = bbox
+    rect = patches.Rectangle((x, y), w, h, linewidth=linewidth, edgecolor=box_color, facecolor='none')
+    ax.add_patch(rect)
+
+    plt.axis('off')
+    plt.show()
 
 class Engine:
     def __init__(self, args, mode='infer', gpu_id=0):
@@ -140,7 +170,7 @@ class Engine:
 
         detec_pose, hist_pose = {}, {}
         for tr in self.phalp_tracker.tracker.tracks:
-            if not tr.is_confirmed() or tr.time_since_update >= 5:
+            if not tr.is_confirmed() or tr.time_since_update >= 1:
                 continue
             tid = tr.track_id
             history = tr.track_data['history']
@@ -209,8 +239,7 @@ class Engine:
         elapsed = time.time() - t_start
         print(f"Processed {frame_count} frames in {elapsed:.2f}s ({frame_count/elapsed:.2f} FPS)")
 
-    @profile
-    def create_posetrack_json_from_model(self, root_eval_dir, output_json_path):
+    def _create_posetrack_json_from_model(self, root_eval_dir, output_json_path):
         images = []
         annotations = []
         
@@ -263,7 +292,6 @@ class Engine:
         print(f"✅ JSON créé: {output_json_path}")
         print(f"   {len(images)} images, {len(annotations)} annotations, {len(scene_dirs)} scènes.")
 
-    @profile
     def annote_posetrack_frame(self, frame, frame_id, input_size):
         h, w = frame.shape[:2]
         transform = get_transform(input_size=input_size, orig_h=h, orig_w=w, device=self.device)
@@ -292,7 +320,7 @@ class Engine:
 
         result = []
         for tr in self.phalp_tracker.tracker.tracks:
-            if not tr.is_confirmed() or tr.time_since_update >= 5:
+            if not tr.is_confirmed() or tr.time_since_update >= 1:
                 continue
             tid = tr.track_id
 
@@ -300,17 +328,112 @@ class Engine:
             keypoints = history['keypoints']
             conf = history['conf']
             bbox = history['bbox']
-
+            
+            #display_bbox(frame, [float(x) for x in bbox])
             track_dict = {
                 "id": -1,  # sera mis dans la fonction appelante
-                "bbox": list(bbox),
-                "image_id": frame_id,
-                "keypoints": keypoints,
-                "scores": [conf] * (len(keypoints) // 3),
-                "person_id": tid,
-                "track_id": tid
+                "bbox": [float(x) for x in bbox],
+                "image_id": int(frame_id),
+                "keypoints": [float(x) for x in keypoints],
+                "scores": [float(conf) for _ in range(len(keypoints)//3)],
+                "person_id": int(tid),
+                "track_id": int(tid)
             }
-
             result.append(track_dict)
 
         return result
+    
+    def _process_scene(self, args):
+        scene, root_eval_dir, input_size = args
+        images = []
+        annotations = []
+        scene_path = os.path.join(root_eval_dir, scene)
+        img_paths = sorted(glob(os.path.join(scene_path, "*.jpg")))
+
+        for frame_idx, img_path in enumerate(img_paths, start=1):
+            image = cv2.imread(img_path)
+            if image is None:
+                print(f"[Warning] Image introuvable: {img_path}")
+                continue
+
+            # appel à la méthode d'annotation
+            detections = self.annote_posetrack_frame(image, frame_idx, input_size)
+
+
+            images.append({
+                        "scene": scene,
+                        "frame_id": frame_idx,
+                        "file_name": os.path.join('/images/val', scene, os.path.basename(img_path))
+                    })
+
+            for det in detections:
+                det_record = det.copy()
+                det_record["scene"] = scene
+                det_record["frame_id"] = frame_idx
+                annotations.append(det_record)
+
+        return images, annotations
+
+    def create_posetrack_json(self, root_eval_dir, output_json_dir, num_workers=4):
+        scene_dirs = sorted([d for d in os.listdir(root_eval_dir)
+                            if os.path.isdir(os.path.join(root_eval_dir, d))])
+
+        args_list = [(scene, root_eval_dir, self.input_size) for scene in scene_dirs]
+
+        os.makedirs(output_json_dir, exist_ok=True)
+
+        # Traitement parallèle
+        with Pool(processes=num_workers) as pool:
+            results = list(tqdm(pool.imap(self._process_scene, args_list),
+                                total=len(args_list),
+                                desc="Traitement des scènes"))
+
+        for (scene, _, _), (images, annotations) in zip(args_list, results):
+            image_id_map = {}
+            for img in images:
+                scene_str = img["scene"]
+                frame_num = img["frame_id"]
+
+                try:
+                    scene_digits = int(scene_str[:6])
+                except ValueError:
+                    raise ValueError(f"Le nom de scène '{scene_str}' ne commence pas par 6 chiffres.")
+
+                new_id = int(f"1{scene_digits:06d}{frame_num:04d}")
+                key = (img["scene"], img["frame_id"])
+                img["id"] = new_id-1
+                img["image_id"] = new_id-1
+                image_id_map[key] = new_id-1
+
+            for ann in annotations:
+                key = (ann["scene"], ann["frame_id"])
+                ann["image_id"] = image_id_map[key]
+                ann["id"] = ann["image_id"] * 1000 + ann["track_id"]
+                ann.pop("frame_id")
+
+            categories = [{
+                "id": 1,
+                "name": "person",
+                "keypoints": [
+                    "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+                    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+                    "left_wrist", "right_wrist", "left_hip", "right_hip",
+                    "left_knee", "right_knee", "left_ankle", "right_ankle"
+                ],
+                "skeleton": []
+            }]
+
+            out = {
+                "images": images,
+                "annotations": annotations,
+                "categories": categories
+            }
+
+            output_path = os.path.join(output_json_dir, f"{scene}.json")
+            with open(output_path, "w") as f:
+                json.dump(out, f, indent=2)
+
+            print(f"✅ JSON scène écrit : {output_path} ({len(images)} images, {len(annotations)} annotations)")
+
+
+

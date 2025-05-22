@@ -32,6 +32,9 @@ import matplotlib.pyplot as plt
 from gtda.homology import VietorisRipsPersistence
 from matplotlib import cm
 
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+
 # --- Fonction utilitaire SMPL45 → COCO17 (numpy) ---
 COCO17_SMPL45_INDICES = [24, 26, 25, 28, 27, 16, 17, 18, 19,
                          20, 21,  1,  2,  4,  5,  7,  8]
@@ -209,7 +212,6 @@ class TrackModel(nn.Module):
 
         return mask
     
-    @profile
     def get_croped_image(self, image, bbox, bbox_pad, seg_mask, output_size=256):
         """
         GPU-native cropping + normalisation + concat mask
@@ -287,7 +289,6 @@ class TrackModel(nn.Module):
 
         return masked_image, center_, scale_, rles, center_pad, scale_pad
 
-    @profile
     def _get_croped_image(self, image, bbox, bbox_pad, seg_mask, output_size=256):
         """
         Args:
@@ -359,7 +360,6 @@ class TrackModel(nn.Module):
 
         return masked_image, center_, scale_, rles, center_pad, scale_pad
 
-    @profile
     def _get_croped_image(self, image, bbox, bbox_pad, seg_mask):
         
         # Encode the mask for storing, borrowed from tao dataset
@@ -445,7 +445,6 @@ class TrackModel(nn.Module):
         cam_np = np.stack([scale, tx, ty], axis=1).astype(np.float32)
         return torch.from_numpy(cam_np)
 
-    @profile
     def get_human_features(self, sat_data, image, frame_name, t_, measurments, gt=None, ann=None, extra_data=None):
         """
         Get human features using SAT-HMR outputs directly and HMAR for appearance and UV maps.
@@ -477,14 +476,54 @@ class TrackModel(nn.Module):
         pred_intrinsic = sat_data['pred_intrinsics'][0]
         pred_cam_xys = sat_data['pred_cam_xys'][0]
 
+        def adjust_boxes_to_original(boxes, orig_w=1280, orig_h=720, input_size=1288):
+            """
+            Ajuste les bounding boxes de l'image 1288x1288 vers l'image originale.
+            
+            Args:
+                boxes: Liste de bounding boxes [x1, y1, x2, y2] dans l'image 1288x1288
+                orig_w: Largeur originale (default: 1280)
+                orig_h: Hauteur originale (default: 720)
+                input_size: Taille d'entrée du modèle (default: 1288)
+            Returns:
+                adjusted_boxes: Bounding boxes ajustées pour l'image originale
+            """
+            pad_top_bottom = (orig_w - orig_h) // 2  # 140 pour 1280x720
+            scale_x = orig_w / input_size  # 1280 / 1288
+            scale_y = (orig_h + 2 * pad_top_bottom) / input_size  # 1000 / 1288
+            
+            adjusted_boxes = []
+            for box in boxes:
+                x1, y1, x2, y2 = box
+                # Étape 1 : Mapper vers l'image paddée
+                x1_pad = x1 * scale_x
+                y1_pad = y1 * scale_y
+                x2_pad = x2 * scale_x
+                y2_pad = y2 * scale_y
+                # Étape 2 : Retirer le padding du haut
+                x1_orig = x1_pad
+                y1_orig = y1_pad - pad_top_bottom
+                x2_orig = x2_pad
+                y2_orig = y2_pad - pad_top_bottom
+                # Étape 3 : Clipper
+                x1_orig = max(0, min(x1_orig, orig_w))
+                y1_orig = max(0, min(y1_orig, orig_h))
+                x2_orig = max(0, min(x2_orig, orig_w))
+                y2_orig = max(0, min(y2_orig, orig_h))
+                adjusted_boxes.append([x1_orig, y1_orig, x2_orig, y2_orig])
+            
+            return np.array(adjusted_boxes)
         # Convert boxes to [x1, y1, x2, y2]
         cx, cy, w, h = pred_boxes[:, 0], pred_boxes[:, 1], pred_boxes[:, 2], pred_boxes[:, 3]
-        x1 = (cx - w / 2) * img_width
-        y1 = (cy - h / 2) * img_height
-        x2 = (cx + w / 2) * img_width
-        y2 = (cy + h / 2) * img_height
-        pred_bbox = torch.stack([x1, y1, x2, y2], dim=-1).cpu().numpy()
+        x1 = (cx - w / 2) * new_image_size
+        y1 = (cy - h / 2) * new_image_size
+        x2 = (cx + w / 2) * new_image_size
+        y2 = (cy + h / 2) * new_image_size
+        pred_bbox_1288 = torch.stack([x1, y1, x2, y2], dim=-1).cpu().numpy()
+        # Étape 2 : Ajustement vers l'image originale (720x1280)
 
+        pred_bbox = adjust_boxes_to_original(pred_bbox_1288, orig_w=img_width, orig_h=img_height, input_size=new_image_size)
+        
         # Filter detections based on score and size thresholds
         NPEOPLE = len(pred_confs)
         masked_image_list = []

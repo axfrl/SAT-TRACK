@@ -1,6 +1,6 @@
 weights_dir /home/alphafalcon/tracker/code/SAT-TRACK/weights
 Preparing models on GPU 0...
-[2025-05-21 19:32:28,819][dinov2][INFO] - using MLP layer as FFN
+[2025-05-22 10:56:09,492][dinov2][INFO] - using MLP layer as FFN
 Model is on device: cuda:0
 Using existing SMPL_NEUTRAL.pkl at /home/alphafalcon/tracker/code/SAT-TRACK/weights/smpl_data/smpl/SMPL_NEUTRAL.pkl
 Using existing smpl_mean_params.npz at /home/alphafalcon/tracker/code/SAT-TRACK/weights/smpl_data/smpl/smpl_mean_params.npz
@@ -18,130 +18,139 @@ Using existing ava_class_mapping.pkl at /home/alphafalcon/tracker/code/SAT-TRACK
 Loading HMAR model...
 Loading Predictor model...
 Setting up DeepSort...
-[INFO] Detected input FPS: 24.0
-[Writer] Initializing writer with size: 1920x1080
+weights_dir /home/alphafalcon/tracker/code/SAT-TRACK/weights
+weights_dir /home/alphafalcon/tracker/code/SAT-TRACK/weights
+weights_dir /home/alphafalcon/tracker/code/SAT-TRACK/weights
+weights_dir /home/alphafalcon/tracker/code/SAT-TRACK/weights
+weights_dir /home/alphafalcon/tracker/code/SAT-TRACK/weights
+weights_dir /home/alphafalcon/tracker/code/SAT-TRACK/weights
+weights_dir /home/alphafalcon/tracker/code/SAT-TRACK/weights
+weights_dir /home/alphafalcon/tracker/code/SAT-TRACK/weights
+weights_dir /home/alphafalcon/tracker/code/SAT-TRACK/weights
+weights_dir /home/alphafalcon/tracker/code/SAT-TRACK/weights
+weights_dir /home/alphafalcon/tracker/code/SAT-TRACK/weights
+weights_dir /home/alphafalcon/tracker/code/SAT-TRACK/weights
 Wrote profile results to main.py.lprof
 Timer unit: 1e-06 s
 
 Total time: 0 s
 File: /home/alphafalcon/tracker/code/SAT-TRACK/engines/engine.py
-Function: create_posetrack_json_from_model at line 212
+Function: _create_posetrack_json_from_model at line 217
 
 Line #      Hits         Time  Per Hit   % Time  Line Contents
 ==============================================================
-   212                                               @profile
-   213                                               def create_posetrack_json_from_model(self, root_eval_dir, output_json_path):
-   214                                                   images = []
-   215                                                   annotations = []
-   216                                                   
-   217                                                   scene_dirs = sorted([d for d in os.listdir(root_eval_dir) if os.path.isdir(os.path.join(root_eval_dir, d))])
-   218                                           
-   219                                                   for scene in tqdm(scene_dirs):
-   220                                                       scene_path = os.path.join(root_eval_dir, scene)
-   221                                                       img_paths = sorted(glob(os.path.join(scene_path, "*.jpg")))
-   222                                           
-   223                                                       for frame_idx, img_path in enumerate(img_paths, start=1):
-   224                                                           image = cv2.imread(img_path)
-   225                                                           if image is None:
-   226                                                               print(f"[Warning] Image introuvable: {img_path}")
-   227                                                               continue
-   228                                           
-   229                                                           detections = self.annote_posetrack_frame(image, frame_idx, self.input_size)
-   230                                           
-   231                                                           images.append({
-   232                                                               "id": frame_idx,
-   233                                                               "file_name": os.path.join(scene, os.path.basename(img_path)),
-   234                                                               "frame_id": frame_idx
-   235                                                           })
-   236                                           
-   237                                                           for det in detections:
-   238                                                               det["id"] = det["image_id"] * 1000 + det["track_id"]  # ID unique par annotation
-   239                                                               annotations.append(det)
-   240                                           
-   241                                                   categories = [{
-   242                                                       "id": 1,
-   243                                                       "name": "person",
-   244                                                       "keypoints": [
-   245                                                           "nose", "left_eye", "right_eye", "left_ear", "right_ear",
-   246                                                           "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
-   247                                                           "left_wrist", "right_wrist", "left_hip", "right_hip",
-   248                                                           "left_knee", "right_knee", "left_ankle", "right_ankle"
-   249                                                       ],
-   250                                                       "skeleton": []
-   251                                                   }]
-   252                                           
-   253                                                   out = {
-   254                                                       "images": images,
-   255                                                       "annotations": annotations,
-   256                                                       "categories": categories
-   257                                                   }
-   258                                           
-   259                                                   os.makedirs(os.path.dirname(output_json_path), exist_ok=True)
-   260                                                   with open(output_json_path, "w") as f:
-   261                                                       json.dump(out, f, indent=2)
-   262                                           
-   263                                                   print(f"✅ JSON créé: {output_json_path}")
-   264                                                   print(f"   {len(images)} images, {len(annotations)} annotations, {len(scene_dirs)} scènes.")
+   217                                               @profile
+   218                                               def _create_posetrack_json_from_model(self, root_eval_dir, output_json_path):
+   219                                                   images = []
+   220                                                   annotations = []
+   221                                                   
+   222                                                   scene_dirs = sorted([d for d in os.listdir(root_eval_dir) if os.path.isdir(os.path.join(root_eval_dir, d))])
+   223                                           
+   224                                                   for scene in tqdm(scene_dirs):
+   225                                                       scene_path = os.path.join(root_eval_dir, scene)
+   226                                                       img_paths = sorted(glob(os.path.join(scene_path, "*.jpg")))
+   227                                           
+   228                                                       for frame_idx, img_path in enumerate(img_paths, start=1):
+   229                                                           image = cv2.imread(img_path)
+   230                                                           if image is None:
+   231                                                               print(f"[Warning] Image introuvable: {img_path}")
+   232                                                               continue
+   233                                           
+   234                                                           detections = self.annote_posetrack_frame(image, frame_idx, self.input_size)
+   235                                           
+   236                                                           images.append({
+   237                                                               "id": frame_idx,
+   238                                                               "file_name": os.path.join(scene, os.path.basename(img_path)),
+   239                                                               "frame_id": frame_idx
+   240                                                           })
+   241                                           
+   242                                                           for det in detections:
+   243                                                               det["id"] = det["image_id"] * 1000 + det["track_id"]  # ID unique par annotation
+   244                                                               annotations.append(det)
+   245                                           
+   246                                                   categories = [{
+   247                                                       "id": 1,
+   248                                                       "name": "person",
+   249                                                       "keypoints": [
+   250                                                           "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+   251                                                           "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+   252                                                           "left_wrist", "right_wrist", "left_hip", "right_hip",
+   253                                                           "left_knee", "right_knee", "left_ankle", "right_ankle"
+   254                                                       ],
+   255                                                       "skeleton": []
+   256                                                   }]
+   257                                           
+   258                                                   out = {
+   259                                                       "images": images,
+   260                                                       "annotations": annotations,
+   261                                                       "categories": categories
+   262                                                   }
+   263                                           
+   264                                                   os.makedirs(os.path.dirname(output_json_path), exist_ok=True)
+   265                                                   with open(output_json_path, "w") as f:
+   266                                                       json.dump(out, f, indent=2)
+   267                                           
+   268                                                   print(f"✅ JSON créé: {output_json_path}")
+   269                                                   print(f"   {len(images)} images, {len(annotations)} annotations, {len(scene_dirs)} scènes.")
 
 Total time: 0 s
 File: /home/alphafalcon/tracker/code/SAT-TRACK/engines/engine.py
-Function: annote_posetrack_frame at line 266
+Function: annote_posetrack_frame at line 271
 
 Line #      Hits         Time  Per Hit   % Time  Line Contents
 ==============================================================
-   266                                               @profile
-   267                                               def annote_posetrack_frame(self, frame, frame_id, input_size):
-   268                                                   h, w = frame.shape[:2]
-   269                                                   transform = get_transform(input_size=input_size, orig_h=h, orig_w=w, device=self.device)
-   270                                                   tensor = preprocess_frame(frame, transform, self.device)
-   271                                                   if self.use_fp16:
-   272                                                       tensor = tensor.half()
-   273                                           
-   274                                                   with torch.no_grad():
-   275                                                       with torch.amp.autocast(device_type="cuda"):
-   276                                                           outputs = self.model(tensor, create_empty_targets(self.device, [h, w]))
-   277                                           
-   278                                                   pad_h, pad_w = input_size - h, input_size - w
-   279                                                   left, top = pad_w // 2, pad_h // 2
-   280                                           
-   281                                                   dets = self.phalp_tracker.get_human_features(
-   282                                                       sat_data=outputs,
-   283                                                       image=frame,
-   284                                                       frame_name=str(frame_id),
-   285                                                       t_=frame_id,
-   286                                                       measurments=(h, w, input_size, left, top)
-   287                                                   )
-   288                                           
-   289                                                   with torch.no_grad():
-   290                                                       self.phalp_tracker.tracker.predict()
-   291                                                       self.phalp_tracker.tracker.update(dets, frame_id, str(frame_id), self.phalp_tracker.cfg.phalp.shot)
-   292                                           
-   293                                                   result = []
-   294                                                   for tr in self.phalp_tracker.tracker.tracks:
-   295                                                       if not tr.is_confirmed() or tr.time_since_update >= 5:
-   296                                                           continue
-   297                                                       tid = tr.track_id
-   298                                           
-   299                                                       history = tr.track_data['history'][-1]
-   300                                                       keypoints = history['keypoints']
-   301                                                       conf = history['conf']
-   302                                                       bbox = history['bbox']
+   271                                               @profile
+   272                                               def annote_posetrack_frame(self, frame, frame_id, input_size):
+   273                                                   h, w = frame.shape[:2]
+   274                                                   transform = get_transform(input_size=input_size, orig_h=h, orig_w=w, device=self.device)
+   275                                                   tensor = preprocess_frame(frame, transform, self.device)
+   276                                                   if self.use_fp16:
+   277                                                       tensor = tensor.half()
+   278                                           
+   279                                                   with torch.no_grad():
+   280                                                       with torch.amp.autocast(device_type="cuda"):
+   281                                                           outputs = self.model(tensor, create_empty_targets(self.device, [h, w]))
+   282                                           
+   283                                                   pad_h, pad_w = input_size - h, input_size - w
+   284                                                   left, top = pad_w // 2, pad_h // 2
+   285                                           
+   286                                                   dets = self.phalp_tracker.get_human_features(
+   287                                                       sat_data=outputs,
+   288                                                       image=frame,
+   289                                                       frame_name=str(frame_id),
+   290                                                       t_=frame_id,
+   291                                                       measurments=(h, w, input_size, left, top)
+   292                                                   )
+   293                                           
+   294                                                   with torch.no_grad():
+   295                                                       self.phalp_tracker.tracker.predict()
+   296                                                       self.phalp_tracker.tracker.update(dets, frame_id, str(frame_id), self.phalp_tracker.cfg.phalp.shot)
+   297                                           
+   298                                                   result = []
+   299                                                   for tr in self.phalp_tracker.tracker.tracks:
+   300                                                       if not tr.is_confirmed() or tr.time_since_update >= 1:
+   301                                                           continue
+   302                                                       tid = tr.track_id
    303                                           
-   304                                                       track_dict = {
-   305                                                           "id": -1,  # sera mis dans la fonction appelante
-   306                                                           "bbox": list(bbox),
-   307                                                           "image_id": frame_id,
-   308                                                           "keypoints": keypoints,
-   309                                                           "scores": [conf] * (len(keypoints) // 3),
-   310                                                           "person_id": tid,
-   311                                                           "track_id": tid
-   312                                                       }
-   313                                           
-   314                                                       result.append(track_dict)
-   315                                           
-   316                                                   return result
+   304                                                       history = tr.track_data['history'][-1]
+   305                                                       keypoints = history['keypoints']
+   306                                                       conf = history['conf']
+   307                                                       bbox = history['bbox']
+   308                                           
+   309                                                       track_dict = {
+   310                                                           "id": -1,  # sera mis dans la fonction appelante
+   311                                                           "bbox": [float(x) for x in bbox],
+   312                                                           "image_id": int(frame_id),
+   313                                                           "keypoints": [float(x) for x in keypoints],
+   314                                                           "scores": [float(conf) for _ in range(len(keypoints)//3)],
+   315                                                           "person_id": int(tid),
+   316                                                           "track_id": int(tid)
+   317                                                       }
+   318                                                       result.append(track_dict)
+   319                                           
+   320                                                   return result
 
-Total time: 2.17542 s
+Total time: 0 s
 File: /home/alphafalcon/tracker/code/SAT-TRACK/tracker/SAT_TRACKER.py
 Function: get_croped_image at line 212
 
@@ -162,68 +171,68 @@ Line #      Hits         Time  Per Hit   % Time  Line Contents
    224                                                   """
    225                                           
    226                                                   # --- 1) RLE encoding (reste CPU & numpy) ---
-   227       847     442616.6    522.6     20.3          masks_decoded = np.array(np.expand_dims(seg_mask, 2), order='F', dtype=np.uint8)
-   228       847     284294.6    335.6     13.1          rles = mask_utils.encode(masks_decoded)
-   229      1694        753.7      0.4      0.0          for r in rles:
-   230       847       1094.7      1.3      0.1              r["counts"] = r["counts"].decode("utf-8")
+   227                                                   masks_decoded = np.array(np.expand_dims(seg_mask, 2), order='F', dtype=np.uint8)
+   228                                                   rles = mask_utils.encode(masks_decoded)
+   229                                                   for r in rles:
+   230                                                       r["counts"] = r["counts"].decode("utf-8")
    231                                           
    232                                                   # --- 2) Prépare les tenseurs et device ---
-   233       847       3959.3      4.7      0.2          device = torch.device("cuda")
+   233                                                   device = torch.device("cuda")
    234                                                   # image → float32 [0,1], BGR→RGB si besoin, shape 1×3×H×W
-   235       847        617.9      0.7      0.0          if isinstance(image, np.ndarray):
-   236       847     420645.3    496.6     19.3              img_t = torch.from_numpy(image).permute(2,0,1).unsqueeze(0).to(device).float() / 255.0
+   235                                                   if isinstance(image, np.ndarray):
+   236                                                       img_t = torch.from_numpy(image).permute(2,0,1).unsqueeze(0).to(device).float() / 255.0
    237                                                   else:
    238                                                       img_t = image.to(device).permute(0,3,1,2).float() if image.ndim==4 else image.permute(2,0,1).unsqueeze(0).to(device).float()/255.0
    239                                           
    240                                                   # seg_mask → float32 [0,1], shape 1×1×H×W
-   241       847       1172.2      1.4      0.1          if isinstance(seg_mask, np.ndarray):
-   242       847     587529.5    693.7     27.0              m_t = torch.from_numpy(seg_mask.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
+   241                                                   if isinstance(seg_mask, np.ndarray):
+   242                                                       m_t = torch.from_numpy(seg_mask.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
    243                                                   else:
    244                                                       m_t = seg_mask.to(device).unsqueeze(0).unsqueeze(0).float()
    245                                           
-   246       847       1852.8      2.2      0.1          B, C, H, W = img_t.shape
+   246                                                   B, C, H, W = img_t.shape
    247                                           
    248                                                   # --- 3) Calcul des centres et échelles ---
-   249       847       5467.2      6.5      0.3          center_pad = np.array([ (bbox_pad[0]+bbox_pad[2])/2, (bbox_pad[1]+bbox_pad[3])/2 ])
-   250       847       1498.2      1.8      0.1          scale_pad  = np.array([ bbox_pad[2]-bbox_pad[0],   bbox_pad[3]-bbox_pad[1] ])
-   251       847       3799.7      4.5      0.2          s = max(scale_pad)
+   249                                                   center_pad = np.array([ (bbox_pad[0]+bbox_pad[2])/2, (bbox_pad[1]+bbox_pad[3])/2 ])
+   250                                                   scale_pad  = np.array([ bbox_pad[2]-bbox_pad[0],   bbox_pad[3]-bbox_pad[1] ])
+   251                                                   s = max(scale_pad)
    252                                           
-   253       847       1052.8      1.2      0.0          cx, cy = center_pad
+   253                                                   cx, cy = center_pad
    254                                                   # Normalisation pour affine_grid (coords dans [-1,1])
    255                                                   # scale_x = (bbox_pad_width) / W, translate_x = (2*cx/W -1)
-   256       847        442.9      0.5      0.0          scale_x = scale_pad[0] / W
-   257       847        322.9      0.4      0.0          scale_y = scale_pad[1] / H
-   258       847        737.6      0.9      0.0          trans_x = 2 * (cx / W) - 1
-   259       847        426.9      0.5      0.0          trans_y = 2 * (cy / H) - 1
+   256                                                   scale_x = scale_pad[0] / W
+   257                                                   scale_y = scale_pad[1] / H
+   258                                                   trans_x = 2 * (cx / W) - 1
+   259                                                   trans_y = 2 * (cy / H) - 1
    260                                           
    261                                                   # Theta pour affine_grid : shape B×2×3
-   262      2541      38374.1     15.1      1.8          theta = torch.tensor([[
-   263       847        303.0      0.4      0.0              [ scale_x,     0.0, trans_x ],
-   264       847        200.0      0.2      0.0              [    0.0, scale_y, trans_y ]
-   265       847        263.8      0.3      0.0          ]], dtype=torch.float32, device=device)
+   262                                                   theta = torch.tensor([[
+   263                                                       [ scale_x,     0.0, trans_x ],
+   264                                                       [    0.0, scale_y, trans_y ]
+   265                                                   ]], dtype=torch.float32, device=device)
    266                                           
    267                                                   # --- 4) Génération de la grille et application ---
-   268       847     136459.1    161.1      6.3          grid = F.affine_grid(theta, size=(B, C, output_size, output_size), align_corners=False)
-   269       847      29625.4     35.0      1.4          img_crop = F.grid_sample(img_t,  grid, mode='bilinear',   padding_mode='zeros', align_corners=False)
+   268                                                   grid = F.affine_grid(theta, size=(B, C, output_size, output_size), align_corners=False)
+   269                                                   img_crop = F.grid_sample(img_t,  grid, mode='bilinear',   padding_mode='zeros', align_corners=False)
    270                                                   # pour le mask on réutilise la même grille
-   271       847      13563.2     16.0      0.6          m_crop   = F.grid_sample(m_t,   grid, mode='nearest',    padding_mode='zeros', align_corners=False)
+   271                                                   m_crop   = F.grid_sample(m_t,   grid, mode='nearest',    padding_mode='zeros', align_corners=False)
    272                                           
    273                                                   # --- 5) Normalisation image (au format ImageNet) ---
    274                                                   # Les moyennes/std sont divisées par 255 pour rester sur [0,1]
-   275       847      53647.1     63.3      2.5          mean = torch.tensor([123.675, 116.280, 103.530], device=device) / 255.0
-   276       847      45807.4     54.1      2.1          std  = torch.tensor([ 58.395,  57.120,  57.375], device=device) / 255.0
-   277       847      54622.0     64.5      2.5          img_norm = (img_crop - mean[None,:,None,None]) / std[None,:,None,None]
+   275                                                   mean = torch.tensor([123.675, 116.280, 103.530], device=device) / 255.0
+   276                                                   std  = torch.tensor([ 58.395,  57.120,  57.375], device=device) / 255.0
+   277                                                   img_norm = (img_crop - mean[None,:,None,None]) / std[None,:,None,None]
    278                                           
    279                                                   # --- 6) Concat image + mask ---
    280                                                   # mask est 1×1×H×W, on garde ce canal unique
-   281       847      27501.4     32.5      1.3          masked_image = torch.cat([img_norm, m_crop], dim=1).squeeze(0)
+   281                                                   masked_image = torch.cat([img_norm, m_crop], dim=1).squeeze(0)
    282                                                   # masked_image : (4, output_size, output_size)
    283                                           
    284                                                   # --- 7) Calcule center/scale original pour retourner ---
-   285       847      14516.5     17.1      0.7          center_ = np.array([ (bbox[0]+bbox[2])/2, (bbox[1]+bbox[3])/2 ])
-   286       847       1853.0      2.2      0.1          scale_  = np.array([ bbox[2]-bbox[0],     bbox[3]-bbox[1] ])
+   285                                                   center_ = np.array([ (bbox[0]+bbox[2])/2, (bbox[1]+bbox[3])/2 ])
+   286                                                   scale_  = np.array([ bbox[2]-bbox[0],     bbox[3]-bbox[1] ])
    287                                           
-   288       847        403.4      0.5      0.0          return masked_image, center_, scale_, rles, center_pad, scale_pad
+   288                                                   return masked_image, center_, scale_, rles, center_pad, scale_pad
 
 Total time: 0 s
 File: /home/alphafalcon/tracker/code/SAT-TRACK/tracker/SAT_TRACKER.py
@@ -343,7 +352,7 @@ Line #      Hits         Time  Per Hit   % Time  Line Contents
    393                                                   
    394                                                   return masked_image, center_, scale_, rles, center_pad, scale_pad
 
-Total time: 8.07647 s
+Total time: 0 s
 File: /home/alphafalcon/tracker/code/SAT-TRACK/tracker/SAT_TRACKER.py
 Function: get_human_features at line 448
 
@@ -367,182 +376,182 @@ Line #      Hits         Time  Per Hit   % Time  Line Contents
    463                                                   Returns:
    464                                                       detection_data_list: List of Detection objects with human features.
    465                                                   """
-   466       104         93.5      0.9      0.0          img_height, img_width, new_image_size, left, top = measurments
-   467       104      12328.4    118.5      0.2          ratio = 1.0 / int(new_image_size) * self.cfg.render.res
+   466                                                   img_height, img_width, new_image_size, left, top = measurments
+   467                                                   ratio = 1.0 / int(new_image_size) * self.cfg.render.res
    468                                           
    469                                                   # Extract SAT-HMR outputs (batch_size=1)
-   470       104       1104.3     10.6      0.0          pred_boxes = sat_data['pred_boxes'][0]  # [num_queries, 4] (center_x, center_y, w, h)
-   471       104        950.4      9.1      0.0          pred_confs = sat_data['pred_confs'][0].squeeze(-1)  # [num_queries]
-   472       104        274.9      2.6      0.0          pred_poses = sat_data['pred_poses'][0]  # [num_queries, 72]
-   473       104        742.2      7.1      0.0          pred_betas = sat_data['pred_betas'][0]  # [num_queries, 10]
-   474       104        738.4      7.1      0.0          pred_j3ds = sat_data['pred_j3ds'][0]  # [num_queries, num_joints, 3]
-   475       104        535.3      5.1      0.0          pred_j2ds = sat_data['pred_j2ds'][0]  # [num_queries, num_joints, 2]
-   476       104        381.2      3.7      0.0          pred_transl = sat_data['pred_transl'][0]  # [num_queries, 3]
-   477       104        304.5      2.9      0.0          pred_intrinsic = sat_data['pred_intrinsics'][0]
-   478       104         44.8      0.4      0.0          pred_cam_xys = sat_data['pred_cam_xys'][0]
+   470                                                   pred_boxes = sat_data['pred_boxes'][0]  # [num_queries, 4] (center_x, center_y, w, h)
+   471                                                   pred_confs = sat_data['pred_confs'][0].squeeze(-1)  # [num_queries]
+   472                                                   pred_poses = sat_data['pred_poses'][0]  # [num_queries, 72]
+   473                                                   pred_betas = sat_data['pred_betas'][0]  # [num_queries, 10]
+   474                                                   pred_j3ds = sat_data['pred_j3ds'][0]  # [num_queries, num_joints, 3]
+   475                                                   pred_j2ds = sat_data['pred_j2ds'][0]  # [num_queries, num_joints, 2]
+   476                                                   pred_transl = sat_data['pred_transl'][0]  # [num_queries, 3]
+   477                                                   pred_intrinsic = sat_data['pred_intrinsics'][0]
+   478                                                   pred_cam_xys = sat_data['pred_cam_xys'][0]
    479                                           
    480                                                   # Convert boxes to [x1, y1, x2, y2]
-   481       104       2672.5     25.7      0.0          cx, cy, w, h = pred_boxes[:, 0], pred_boxes[:, 1], pred_boxes[:, 2], pred_boxes[:, 3]
-   482       104       6754.4     64.9      0.1          x1 = (cx - w / 2) * img_width
-   483       104       4017.5     38.6      0.0          y1 = (cy - h / 2) * img_height
-   484       104       3938.8     37.9      0.0          x2 = (cx + w / 2) * img_width
-   485       104       3675.6     35.3      0.0          y2 = (cy + h / 2) * img_height
-   486       104       7464.1     71.8      0.1          pred_bbox = torch.stack([x1, y1, x2, y2], dim=-1).cpu().numpy()
+   481                                                   cx, cy, w, h = pred_boxes[:, 0], pred_boxes[:, 1], pred_boxes[:, 2], pred_boxes[:, 3]
+   482                                                   x1 = (cx - w / 2) * img_width
+   483                                                   y1 = (cy - h / 2) * img_height
+   484                                                   x2 = (cx + w / 2) * img_width
+   485                                                   y2 = (cy + h / 2) * img_height
+   486                                                   pred_bbox = torch.stack([x1, y1, x2, y2], dim=-1).cpu().numpy()
    487                                           
    488                                                   # Filter detections based on score and size thresholds
-   489       104        768.6      7.4      0.0          NPEOPLE = len(pred_confs)
-   490       104         44.1      0.4      0.0          masked_image_list = []
-   491       104         20.2      0.2      0.0          center_list = []
-   492       104         20.9      0.2      0.0          scale_list = []
-   493       104         22.7      0.2      0.0          rles_list = []
-   494       104         40.1      0.4      0.0          selected_ids = []
-   495       104        799.3      7.7      0.0          pred_classes = np.zeros(NPEOPLE, dtype=np.int64)  # Class 0 (person)
-   496       104         91.7      0.9      0.0          ground_truth_track_id = [1] * NPEOPLE  # Default track IDs
-   497       104         48.5      0.5      0.0          ground_truth_annotations = [[]] * NPEOPLE  # Default annotations
+   489                                                   NPEOPLE = len(pred_confs)
+   490                                                   masked_image_list = []
+   491                                                   center_list = []
+   492                                                   scale_list = []
+   493                                                   rles_list = []
+   494                                                   selected_ids = []
+   495                                                   pred_classes = np.zeros(NPEOPLE, dtype=np.int64)  # Class 0 (person)
+   496                                                   ground_truth_track_id = [1] * NPEOPLE  # Default track IDs
+   497                                                   ground_truth_annotations = [[]] * NPEOPLE  # Default annotations
    498                                           
-   499      5304       1831.3      0.3      0.0          for p_ in range(NPEOPLE):
-   500      5200     640126.9    123.1      7.9              if pred_confs[p_] < self.cfg.phalp.low_th_c:
-   501      4353       1706.2      0.4      0.0                  continue
-   502       847       3641.5      4.3      0.0              w = pred_bbox[p_][2] - pred_bbox[p_][0]
-   503       847        836.7      1.0      0.0              h = pred_bbox[p_][3] - pred_bbox[p_][1]
-   504       847     129808.8    153.3      1.6              if w < self.cfg.phalp.small_w or h < self.cfg.phalp.small_h:
+   499                                                   for p_ in range(NPEOPLE):
+   500                                                       if pred_confs[p_] < self.cfg.phalp.low_th_c:
+   501                                                           continue
+   502                                                       w = pred_bbox[p_][2] - pred_bbox[p_][0]
+   503                                                       h = pred_bbox[p_][3] - pred_bbox[p_][1]
+   504                                                       if w < self.cfg.phalp.small_w or h < self.cfg.phalp.small_h:
    505                                                           continue
    506                                                       
    507                                                       # Generate synthetic mask
-   508       847      50385.2     59.5      0.6              mask = self._generate_synthetic_masks(pred_bbox[p_][None], img_height, img_width)[0]
-   509       847     754038.6    890.2      9.3              rle = mask_utils.encode(np.asfortranarray(mask.astype(np.uint8)))
-   510       847       1296.0      1.5      0.0              rle['counts'] = rle['counts'].decode('utf-8')
+   508                                                       mask = self._generate_synthetic_masks(pred_bbox[p_][None], img_height, img_width)[0]
+   509                                                       rle = mask_utils.encode(np.asfortranarray(mask.astype(np.uint8)))
+   510                                                       rle['counts'] = rle['counts'].decode('utf-8')
    511                                           
    512                                                       # Compute center, scale, and cropped image for HMAR
-   513       847      11433.1     13.5      0.1              center = np.array([(pred_bbox[p_][0] + pred_bbox[p_][2]) / 2, (pred_bbox[p_][1] + pred_bbox[p_][3]) / 2])
-   514       847      70803.9     83.6      0.9              scale = np.array([w, h]) / self.cfg.render.res
-   515       847        652.4      0.8      0.0              bbox = pred_bbox[p_]
-   516       847      10839.2     12.8      0.1              bbox_pad = np.array([bbox[0] - w * 0.125, bbox[1] - h * 0.125, bbox[2] + w * 0.125, bbox[3] + h * 0.125])
-   517       847    2209368.6   2608.5     27.4              masked_image, center_pad, scale_pad, _, _, _ = self.get_croped_image(image, bbox, bbox_pad, mask)
+   513                                                       center = np.array([(pred_bbox[p_][0] + pred_bbox[p_][2]) / 2, (pred_bbox[p_][1] + pred_bbox[p_][3]) / 2])
+   514                                                       scale = np.array([w, h]) / self.cfg.render.res
+   515                                                       bbox = pred_bbox[p_]
+   516                                                       bbox_pad = np.array([bbox[0] - w * 0.125, bbox[1] - h * 0.125, bbox[2] + w * 0.125, bbox[3] + h * 0.125])
+   517                                                       masked_image, center_pad, scale_pad, _, _, _ = self.get_croped_image(image, bbox, bbox_pad, mask)
    518                                                       
-   519       847        638.4      0.8      0.0              masked_image_list.append(masked_image)
-   520       847        304.9      0.4      0.0              center_list.append(center_pad)
-   521       847        270.3      0.3      0.0              scale_list.append(scale_pad)
-   522       847        282.0      0.3      0.0              rles_list.append(rle)
-   523       847        463.2      0.5      0.0              selected_ids.append(p_)
+   519                                                       masked_image_list.append(masked_image)
+   520                                                       center_list.append(center_pad)
+   521                                                       scale_list.append(scale_pad)
+   522                                                       rles_list.append(rle)
+   523                                                       selected_ids.append(p_)
    524                                                   
-   525       104        109.0      1.0      0.0          if len(selected_ids) == 0:
+   525                                                   if len(selected_ids) == 0:
    526                                                       return []
    527                                           
-   528       104         40.0      0.4      0.0          BS = len(selected_ids)
+   528                                                   BS = len(selected_ids)
    529                                                   
    530                                                   # Run HMAR for appearance and UV maps
-   531       104         28.8      0.3      0.0          if BS > 0:
-   532       104       4749.2     45.7      0.1              masked_image_list = torch.stack(masked_image_list, dim=0)
-   533       208       2364.8     11.4      0.0              with torch.no_grad():
-   534       104         43.0      0.4      0.0                  extra_args = {}
-   535       104    2683094.2  25799.0     33.2                  hmar_out = self.HMAR(masked_image_list.cuda(), **extra_args)
-   536       104         75.3      0.7      0.0                  uv_vector = hmar_out['uv_vector']  # [BS, 256, 256, 3]
-   537       104     133729.6   1285.9      1.7                  appe_embedding = self.HMAR.autoencoder_hmar(uv_vector, en=True)  # [BS, embedding_dim]
-   538       104        927.7      8.9      0.0                  appe_embedding  = appe_embedding.view(appe_embedding.shape[0], -1)
+   531                                                   if BS > 0:
+   532                                                       masked_image_list = torch.stack(masked_image_list, dim=0)
+   533                                                       with torch.no_grad():
+   534                                                           extra_args = {}
+   535                                                           hmar_out = self.HMAR(masked_image_list.cuda(), **extra_args)
+   536                                                           uv_vector = hmar_out['uv_vector']  # [BS, 256, 256, 3]
+   537                                                           appe_embedding = self.HMAR.autoencoder_hmar(uv_vector, en=True)  # [BS, embedding_dim]
+   538                                                           appe_embedding  = appe_embedding.view(appe_embedding.shape[0], -1)
    539                                           
    540                                                   else:
    541                                                       uv_vector = np.zeros((BS, 256, 256, 3))
    542                                                       appe_embedding = torch.zeros(BS, 512)  # Dummy embedding
    543                                           
    544                                                   # Prepare SMPL parameters and joints from SAT-HMR
-   545       104      73624.9    707.9      0.9          pred_cam_tensor = pred_transl[selected_ids]  # (BS, 3) – torch.Tensor
-   546       104         50.1      0.5      0.0          pred_smpl_params = []
-   547       951        429.3      0.5      0.0          for idx in selected_ids:
-   548       847       4833.6      5.7      0.1              aa        = pred_poses[idx]            # (72,)
-   549       847       8508.7     10.0      0.1              global_aa = aa[:3].unsqueeze(0)        # (1,3)
-   550       847       7053.9      8.3      0.1              body_aa   = aa[3:].view(-1,3)          # (23,3)
+   545                                                   pred_cam_tensor = pred_transl[selected_ids]  # (BS, 3) – torch.Tensor
+   546                                                   pred_smpl_params = []
+   547                                                   for idx in selected_ids:
+   548                                                       aa        = pred_poses[idx]            # (72,)
+   549                                                       global_aa = aa[:3].unsqueeze(0)        # (1,3)
+   550                                                       body_aa   = aa[3:].view(-1,3)          # (23,3)
    551                                           
    552                                                       # axis-angle → rotmat
-   553       847     347453.5    410.2      4.3              global_rot = batch_rodrigues(global_aa)[0].cpu().numpy()   # (3,3)
-   554       847     337717.4    398.7      4.2              body_rot   = batch_rodrigues(body_aa).cpu().numpy()       # (23,3,3)
+   553                                                       global_rot = batch_rodrigues(global_aa)[0].cpu().numpy()   # (3,3)
+   554                                                       body_rot   = batch_rodrigues(body_aa).cpu().numpy()       # (23,3,3)
    555                                           
-   556      1694       1741.7      1.0      0.0              pred_smpl_params.append({
-   557       847       1058.4      1.2      0.0                  'global_orient': global_rot[None, ...],  # (1,3,3)
-   558       847        161.7      0.2      0.0                  'body_pose'    : body_rot,               # (23,3,3)
-   559       847      29361.1     34.7      0.4                  'betas'        : pred_betas[idx].cpu().numpy()  # (10,)
+   556                                                       pred_smpl_params.append({
+   557                                                           'global_orient': global_rot[None, ...],  # (1,3,3)
+   558                                                           'body_pose'    : body_rot,               # (23,3,3)
+   559                                                           'betas'        : pred_betas[idx].cpu().numpy()  # (10,)
    560                                                       })
    561                                                   
-   562       104      10131.6     97.4      0.1          pred_cam_np = self.transl3d_to_weak_cam(pred_cam_tensor.cpu().numpy())  # (BS,3) array
+   562                                                   pred_cam_np = self.transl3d_to_weak_cam(pred_cam_tensor.cpu().numpy())  # (BS,3) array
    563                                           
-   564       104      11003.0    105.8      0.1          pred_joints_3d = pred_j3ds[selected_ids].cpu().numpy()  # [BS, num_joints, 3]
-   565       104       9447.8     90.8      0.1          pred_joints_2d = pred_j2ds[selected_ids].cpu().numpy()  # [BS, num_joints, 2]
-   566       104       9261.6     89.1      0.1          pred_cam = pred_transl[selected_ids].cpu().numpy()  # [BS, 3]
-   567       104         47.0      0.5      0.0          pred_cam_weak = []
+   564                                                   pred_joints_3d = pred_j3ds[selected_ids].cpu().numpy()  # [BS, num_joints, 3]
+   565                                                   pred_joints_2d = pred_j2ds[selected_ids].cpu().numpy()  # [BS, num_joints, 2]
+   566                                                   pred_cam = pred_transl[selected_ids].cpu().numpy()  # [BS, 3]
+   567                                                   pred_cam_weak = []
    568                                                   # Compute pose embedding
-   569       104       9710.0     93.4      0.1          if self.cfg.phalp.pose_distance == "joints":
+   569                                                   if self.cfg.phalp.pose_distance == "joints":
    570                                                       pose_embedding = torch.from_numpy(pred_joints_3d).view(BS, -1)
-   571       104       6660.4     64.0      0.1          elif self.cfg.phalp.pose_distance == "smpl":
-   572       104         25.1      0.2      0.0              pose_embedding_list = []
-   573       951        463.5      0.5      0.0              for i in range(BS):
-   574       847       4134.5      4.9      0.1                  pred_cam_weak.append(pred_cam_np[i])
-   575      1694     129760.3     76.6      1.6                  emb_np = smpl_to_pose_camera_vector(
-   576       847        282.9      0.3      0.0                      pred_smpl_params[i],      # dict avec rotmats + betas
-   577       847       1548.7      1.8      0.0                      pred_cam_np[i]            # [scale, tx, ty]
+   571                                                   elif self.cfg.phalp.pose_distance == "smpl":
+   572                                                       pose_embedding_list = []
+   573                                                       for i in range(BS):
+   574                                                           pred_cam_weak.append(pred_cam_np[i])
+   575                                                           emb_np = smpl_to_pose_camera_vector(
+   576                                                               pred_smpl_params[i],      # dict avec rotmats + betas
+   577                                                               pred_cam_np[i]            # [scale, tx, ty]
    578                                                           )
-   579       847       4234.4      5.0      0.1                  pose_embedding_list.append(torch.from_numpy(emb_np[0]))
-   580       104       1841.9     17.7      0.0              pose_embedding = torch.stack(pose_embedding_list, dim=0)
+   579                                                           pose_embedding_list.append(torch.from_numpy(emb_np[0]))
+   580                                                       pose_embedding = torch.stack(pose_embedding_list, dim=0)
    581                                                   else:
    582                                                       raise ValueError("Unknown pose distance")
    583                                                   
    584                                                   # Compute location embedding
-   585       104      11345.6    109.1      0.1          pred_joints_2d_ = pred_joints_2d.reshape(BS, -1) / self.cfg.render.res
-   586       104        159.9      1.5      0.0          pred_cam_ = pred_cam.reshape(BS, -1)
-   587       312       2189.0      7.0      0.0          loca_embedding = torch.cat((torch.from_numpy(pred_joints_2d_), torch.from_numpy(pred_cam_),
-   588       208        254.0      1.2      0.0                                  torch.from_numpy(pred_cam_), torch.from_numpy(pred_cam_)), dim=1)
+   585                                                   pred_joints_2d_ = pred_joints_2d.reshape(BS, -1) / self.cfg.render.res
+   586                                                   pred_cam_ = pred_cam.reshape(BS, -1)
+   587                                                   loca_embedding = torch.cat((torch.from_numpy(pred_joints_2d_), torch.from_numpy(pred_cam_),
+   588                                                                           torch.from_numpy(pred_cam_), torch.from_numpy(pred_cam_)), dim=1)
    589                                           
    590                                                   # Compute full embedding (for legacy)
-   591       104      12247.6    117.8      0.2          full_embedding = torch.cat((appe_embedding.cpu(), pose_embedding, loca_embedding), dim=1)
+   591                                                   full_embedding = torch.cat((appe_embedding.cpu(), pose_embedding, loca_embedding), dim=1)
    592                                                   
-   593       104      11248.6    108.2      0.1          j2ds_smpl = pred_j2ds[selected_ids].cpu().numpy()  # [BS, 45, 2]
+   593                                                   j2ds_smpl = pred_j2ds[selected_ids].cpu().numpy()  # [BS, 45, 2]
    594                                                   # convertis en 17 keypoints COCO
-   595       104       2425.7     23.3      0.0          j2ds_coco = smpl45_to_coco17(j2ds_smpl)            # [BS, 17, 2]
+   595                                                   j2ds_coco = smpl45_to_coco17(j2ds_smpl)            # [BS, 17, 2]
    596                                           
    597                                                   # Create detection data list
-   598       104         31.8      0.3      0.0          detection_data_list = []
-   599       951        620.4      0.7      0.0          for i, p_ in enumerate(selected_ids):
-   600       847        563.0      0.7      0.0              joints_2d = j2ds_coco[i]
-   601       847        216.9      0.3      0.0              keypoints = []
-   602       847        189.4      0.2      0.0              count_out = 0
-   603     15246       4021.3      0.3      0.0              for j in range(joints_2d.shape[0]):
-   604     14399      18931.9      1.3      0.2                  x, y = joints_2d[j]
-   605     14399     101529.4      7.1      1.3                  if 0 <= x < img_width and 0 <= y < img_height:
-   606     14319       2724.4      0.2      0.0                      vi = 1
+   598                                                   detection_data_list = []
+   599                                                   for i, p_ in enumerate(selected_ids):
+   600                                                       joints_2d = j2ds_coco[i]
+   601                                                       keypoints = []
+   602                                                       count_out = 0
+   603                                                       for j in range(joints_2d.shape[0]):
+   604                                                           x, y = joints_2d[j]
+   605                                                           if 0 <= x < img_width and 0 <= y < img_height:
+   606                                                               vi = 1
    607                                                           else:
-   608        80         19.4      0.2      0.0                      vi = 0
-   609        80         25.7      0.3      0.0                      count_out += 1
-   610     14399       8317.2      0.6      0.1                  keypoints.extend([x, y, vi])
+   608                                                               vi = 0
+   609                                                               count_out += 1
+   610                                                           keypoints.extend([x, y, vi])
    611                                                       
-   612     16093      11060.1      0.7      0.1              detection_data = {
-   613      1694       2730.2      1.6      0.0                  "bbox": np.array([pred_bbox[p_][0], pred_bbox[p_][1],
-   614       847       1553.2      1.8      0.0                                  pred_bbox[p_][2] - pred_bbox[p_][0], pred_bbox[p_][3] - pred_bbox[p_][1]]),
-   615       847        299.9      0.4      0.0                  "mask": rles_list[i],
-   616       847      34850.4     41.1      0.4                  "conf": pred_confs[p_].cpu().numpy(),
-   617       847      29179.1     34.4      0.4                  "appe": appe_embedding[i].cpu().numpy(),
-   618       847       5748.8      6.8      0.1                  "pose": pose_embedding[i].numpy(),
-   619       847       3927.3      4.6      0.0                  "loca": loca_embedding[i].numpy(),
-   620       847       2773.6      3.3      0.0                  "uv": uv_vector[i],
-   621       847       4154.2      4.9      0.1                  "embedding": full_embedding[i].numpy(),
-   622       847       8520.7     10.1      0.1                  "center": center_list[i] + np.array([left, top]) * ratio,
-   623       847       3121.6      3.7      0.0                  "scale": scale_list[i] * ratio,
-   624       847        216.0      0.3      0.0                  "smpl": pred_smpl_params[i],
-   625       847        698.9      0.8      0.0                  "camera": pred_cam_[i],
-   626       847        321.3      0.4      0.0                  "camera_bbox": pred_cam_[i],  # Use transl as proxy
-   627       847        147.8      0.2      0.0                  "pred_intrinsic": pred_intrinsic,
-   628       847        153.9      0.2      0.0                  "pred_cam_xys": pred_cam_xys,
-   629       847        401.7      0.5      0.0                  "3d_joints": pred_joints_3d[i],
-   630       847        384.8      0.5      0.0                  "2d_joints": pred_joints_2d_[i],
-   631       847        266.4      0.3      0.0                  "size": [img_height, img_width],
-   632       847        150.3      0.2      0.0                  "img_path": frame_name,
-   633       847       1316.9      1.6      0.0                  "img_name": frame_name.split('/')[-1] if isinstance(frame_name, str) else None,
-   634       847        564.6      0.7      0.0                  "class_name": pred_classes[p_],
-   635       847        151.7      0.2      0.0                  "time": t_,
-   636       847        327.9      0.4      0.0                  "ground_truth": gt[p_] if gt is not None else ground_truth_track_id[p_],
-   637       847        261.3      0.3      0.0                  "annotations": ann[p_] if ann is not None else ground_truth_annotations[p_],
-   638       847        215.1      0.3      0.0                  "extra_data": extra_data[p_] if extra_data is not None else None,
-   639       847        137.1      0.2      0.0                  "keypoints": keypoints
+   612                                                       detection_data = {
+   613                                                           "bbox": np.array([pred_bbox[p_][0], pred_bbox[p_][1],
+   614                                                                           pred_bbox[p_][2] - pred_bbox[p_][0], pred_bbox[p_][3] - pred_bbox[p_][1]]),
+   615                                                           "mask": rles_list[i],
+   616                                                           "conf": pred_confs[p_].cpu().numpy(),
+   617                                                           "appe": appe_embedding[i].cpu().numpy(),
+   618                                                           "pose": pose_embedding[i].numpy(),
+   619                                                           "loca": loca_embedding[i].numpy(),
+   620                                                           "uv": uv_vector[i],
+   621                                                           "embedding": full_embedding[i].numpy(),
+   622                                                           "center": center_list[i] + np.array([left, top]) * ratio,
+   623                                                           "scale": scale_list[i] * ratio,
+   624                                                           "smpl": pred_smpl_params[i],
+   625                                                           "camera": pred_cam_[i],
+   626                                                           "camera_bbox": pred_cam_[i],  # Use transl as proxy
+   627                                                           "pred_intrinsic": pred_intrinsic,
+   628                                                           "pred_cam_xys": pred_cam_xys,
+   629                                                           "3d_joints": pred_joints_3d[i],
+   630                                                           "2d_joints": pred_joints_2d_[i],
+   631                                                           "size": [img_height, img_width],
+   632                                                           "img_path": frame_name,
+   633                                                           "img_name": frame_name.split('/')[-1] if isinstance(frame_name, str) else None,
+   634                                                           "class_name": pred_classes[p_],
+   635                                                           "time": t_,
+   636                                                           "ground_truth": gt[p_] if gt is not None else ground_truth_track_id[p_],
+   637                                                           "annotations": ann[p_] if ann is not None else ground_truth_annotations[p_],
+   638                                                           "extra_data": extra_data[p_] if extra_data is not None else None,
+   639                                                           "keypoints": keypoints
    640                                                       }
-   641       847      13439.7     15.9      0.2              detection_data_list.append(Detection(detection_data))
+   641                                                       detection_data_list.append(Detection(detection_data))
    642                                           
-   643       104         19.5      0.2      0.0          return detection_data_list
+   643                                                   return detection_data_list
 
