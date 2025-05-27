@@ -170,196 +170,44 @@ class TrackModel(nn.Module):
         # by default this will not be initialized
         self.postprocessor = Postprocessor(self.cfg, self)
     
-    def generate_mask_from_vertices(self, vertices, cam_intrinsics, frame_size, radius=5, n_samples=100_000):
+    def generate_mask_from_vertices(self,
+                                    vertices: torch.Tensor, 
+                                    cam_intrinsics: torch.Tensor, 
+                                    image_size: int = 512, 
+                                    dilation_kernel_size: int = 15) -> np.ndarray:
         """
-        Génère un masque binaire approximant la silhouette à partir des vertices projetés.
-
+        Crée un masque binaire 2D à partir de vertices 3D projetés avec les paramètres intrinsèques d'une caméra.
+        
         Args:
-            vertices (np.ndarray): (N, 3) vertices du mesh (en mètres)
-            cam_intrinsics (np.ndarray): (3, 3) matrice K de la caméra
-            frame_size (tuple): (H, W) de l’image de sortie
-            radius (int): Rayon du noyau circulaire autour de chaque point projeté
-            n_samples (int): Nombre max de points à projeter
-
+            vertices (torch.Tensor): (V, 3) tensor contenant les vertices du maillage.
+            cam_intrinsics (torch.Tensor): (3, 3) matrice des paramètres intrinsèques de la caméra.
+            image_size (int): Taille de l'image carrée de sortie (H = W = image_size).
+            dilation_kernel_size (int): Taille du noyau pour la dilatation (doit être impair).
+            
         Returns:
-            mask (np.ndarray): (H, W) uint8 mask binaire (1 = humain)
+            mask (np.ndarray): masque binaire (image_size, image_size), 0 ou 255.
         """
-        H, W = map(int, frame_size)
-        if vertices.shape[0] == 0:
-            return np.zeros((H, W), dtype=np.uint8)
-
-        # Sous-échantillonnage si nécessaire
-        if vertices.shape[0] > n_samples:
-            idx = np.random.choice(vertices.shape[0], n_samples, replace=False)
-            vertices = vertices[idx]
-
         # Projection 3D -> 2D
-        K = cam_intrinsics.astype(np.float32)
-        verts_proj = vertices @ K.T
-        pts2d = verts_proj[:, :2] / (verts_proj[:, 2:] + 1e-6)
+        verts_homo = torch.matmul(vertices, cam_intrinsics.transpose(-1, -2))  # (V, 3)
+        verts_2d = verts_homo[..., :2] / (verts_homo[..., 2:3] + 1e-6)  # (V, 2)
 
-        # Clipping dans l’image
-        xs = np.clip(pts2d[:, 0], 0, W - 1).astype(np.int32)
-        ys = np.clip(pts2d[:, 1], 0, H - 1).astype(np.int32)
+        # Conversion en numpy et arrondi des coordonnées 2D
+        verts_2d_np = verts_2d.cpu().numpy()
+        verts_2d_np = np.round(verts_2d_np).astype(int)[0]
+        # Création du masque vide
+        mask = np.zeros((image_size, image_size), dtype=np.uint8)
 
-        # Création d’un masque binaire
-        mask = np.zeros((H, W), dtype=np.uint8)
-        mask[ys, xs] = 1
+        # Remplissage du masque avec les points projetés
+        for x, y in verts_2d_np:
+            if 0 <= x < image_size and 0 <= y < image_size:
+                mask[y, x] = 255  # Note : OpenCV utilise l'ordre (y, x)
 
-        # Dilatation circulaire pour obtenir un corps complet
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+        # Dilatation pour rendre le masque plus visible
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilation_kernel_size, dilation_kernel_size))
         mask = cv2.dilate(mask, kernel, iterations=1)
 
         return mask
     
-    def get_croped_image(self, image, bbox, bbox_pad, seg_mask, output_size=256):
-        """
-        GPU-native cropping + normalisation + concat mask
-        Inputs:
-        - image:   H×W×3 numpy uint8 BGR ou torch.uint8 tensor BGR
-        - seg_mask: H×W numpy bool/uint8 ou torch tensor (0/1)
-        - bbox, bbox_pad: listes [x0,y0,x1,y1] en pixels
-        - output_size: int, taille carrée de sortie
-        Returns:
-        - masked_image: torch.FloatTensor (4×output_size×output_size) sur GPU
-        - center_, scale_, rles, center_pad, scale_pad (comme avant)
-        """
-
-        # --- 1) RLE encoding (reste CPU & numpy) ---
-        masks_decoded = np.array(np.expand_dims(seg_mask, 2), order='F', dtype=np.uint8)
-        rles = mask_utils.encode(masks_decoded)
-        for r in rles:
-            r["counts"] = r["counts"].decode("utf-8")
-
-        # --- 2) Prépare les tenseurs et device ---
-        device = torch.device("cuda")
-        # image → float32 [0,1], BGR→RGB si besoin, shape 1×3×H×W
-        if isinstance(image, np.ndarray):
-            img_t = torch.from_numpy(image).permute(2,0,1).unsqueeze(0).to(device).float() / 255.0
-        else:
-            img_t = image.to(device).permute(0,3,1,2).float() if image.ndim==4 else image.permute(2,0,1).unsqueeze(0).to(device).float()/255.0
-
-        # seg_mask → float32 [0,1], shape 1×1×H×W
-        if isinstance(seg_mask, np.ndarray):
-            m_t = torch.from_numpy(seg_mask.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
-        else:
-            m_t = seg_mask.to(device).unsqueeze(0).unsqueeze(0).float()
-
-        B, C, H, W = img_t.shape
-
-        # --- 3) Calcul des centres et échelles ---
-        center_pad = np.array([ (bbox_pad[0]+bbox_pad[2])/2, (bbox_pad[1]+bbox_pad[3])/2 ])
-        scale_pad  = np.array([ bbox_pad[2]-bbox_pad[0],   bbox_pad[3]-bbox_pad[1] ])
-        s = max(scale_pad)
-
-        cx, cy = center_pad
-        # Normalisation pour affine_grid (coords dans [-1,1])
-        # scale_x = (bbox_pad_width) / W, translate_x = (2*cx/W -1)
-        scale_x = scale_pad[0] / W
-        scale_y = scale_pad[1] / H
-        trans_x = 2 * (cx / W) - 1
-        trans_y = 2 * (cy / H) - 1
-
-        # Theta pour affine_grid : shape B×2×3
-        theta = torch.tensor([[
-            [ scale_x,     0.0, trans_x ],
-            [    0.0, scale_y, trans_y ]
-        ]], dtype=torch.float32, device=device)
-
-        # --- 4) Génération de la grille et application ---
-        grid = F.affine_grid(theta, size=(B, C, output_size, output_size), align_corners=False)
-        img_crop = F.grid_sample(img_t,  grid, mode='bilinear',   padding_mode='zeros', align_corners=False)
-        # pour le mask on réutilise la même grille
-        m_crop   = F.grid_sample(m_t,   grid, mode='nearest',    padding_mode='zeros', align_corners=False)
-
-        # --- 5) Normalisation image (au format ImageNet) ---
-        # Les moyennes/std sont divisées par 255 pour rester sur [0,1]
-        mean = torch.tensor([123.675, 116.280, 103.530], device=device) / 255.0
-        std  = torch.tensor([ 58.395,  57.120,  57.375], device=device) / 255.0
-        img_norm = (img_crop - mean[None,:,None,None]) / std[None,:,None,None]
-
-        # --- 6) Concat image + mask ---
-        # mask est 1×1×H×W, on garde ce canal unique
-        masked_image = torch.cat([img_norm, m_crop], dim=1).squeeze(0)
-        # masked_image : (4, output_size, output_size)
-
-        # --- 7) Calcule center/scale original pour retourner ---
-        center_ = np.array([ (bbox[0]+bbox[2])/2, (bbox[1]+bbox[3])/2 ])
-        scale_  = np.array([ bbox[2]-bbox[0],     bbox[3]-bbox[1] ])
-
-        return masked_image, center_, scale_, rles, center_pad, scale_pad
-
-    def _get_croped_image(self, image, bbox, bbox_pad, seg_mask, output_size=256):
-        """
-        Args:
-            image:      H×W×3 (BGR uint8)
-            bbox:       [x0, y0, x1, y1] - sans padding
-            bbox_pad:   [x0, y0, x1, y1] - avec padding
-            seg_mask:   H×W (bool ou uint8)
-            output_size: taille du carré en sortie (par défaut 256)
-
-        Returns:
-            masked_image: Tensor C×H×W (3 canaux image + 1 canal masque)
-            center_:      centre du bbox original
-            scale_:       échelle du bbox original
-            rles:         encodage COCO du masque
-            center_pad:   centre du bbox_pad
-            scale_pad:    échelle du bbox_pad
-        """
-
-        # Encode mask (comme dans TAO)
-        masks_decoded = np.array(np.expand_dims(seg_mask, 2), order='F', dtype=np.uint8)
-        rles = mask_utils.encode(masks_decoded)
-        for rle in rles:
-            rle["counts"] = rle["counts"].decode("utf-8")
-
-        # Ensure seg_mask is 3-channel uint8
-        if seg_mask.dtype != np.uint8:
-            seg_mask = (seg_mask > 0).astype(np.uint8) * 255
-        if len(seg_mask.shape) == 2:
-            seg_mask = cv2.cvtColor(seg_mask, cv2.COLOR_GRAY2BGR)
-
-        # Centres et échelles
-        center_ = np.array([(bbox[2] + bbox[0]) / 2, (bbox[3] + bbox[1]) / 2])
-        scale_  = np.array([(bbox[2] - bbox[0]),     (bbox[3] - bbox[1])])
-
-        center_pad = np.array([(bbox_pad[2] + bbox_pad[0]) / 2, (bbox_pad[3] + bbox_pad[1]) / 2])
-        scale_pad  = np.array([(bbox_pad[2] - bbox_pad[0]),     (bbox_pad[3] - bbox_pad[1])])
-
-        # Transformation affine
-        def get_affine_transform(center, scale, out_res):
-            s = max(scale)
-            src = np.array([
-                [center[0] - s/2, center[1] - s/2],
-                [center[0] - s/2, center[1] + s/2],
-                [center[0] + s/2, center[1] - s/2]
-            ], dtype=np.float32)
-            dst = np.array([
-                [0, 0],
-                [0, out_res - 1],
-                [out_res - 1, 0]
-            ], dtype=np.float32)
-            return cv2.getAffineTransform(src, dst)
-
-        M = get_affine_transform(center_pad, scale_pad, output_size)
-
-        # Image crop et normalisation
-        cropped_img = cv2.warpAffine(image, M, (output_size, output_size), flags=cv2.INTER_LINEAR)
-        cropped_mask = cv2.warpAffine(seg_mask, M, (output_size, output_size), flags=cv2.INTER_NEAREST)
-
-        # Normalisation image
-        mean = np.array([123.675, 116.280, 103.530], dtype=np.float32)
-        std  = np.array([ 58.395,  57.120,  57.375], dtype=np.float32)
-        img_f = cropped_img.astype(np.float32)
-        img_f = (img_f - mean[None, None, :]) / std[None, None, :]
-
-        # Passage en tensor
-        image_tmp = torch.from_numpy(img_f.transpose(2, 0, 1))  # CxHxW
-        mask_tmp = torch.from_numpy(cropped_mask.astype(np.float32).transpose(2, 0, 1))  # 3xHxW
-        masked_image = torch.cat((image_tmp, mask_tmp[:1, :, :]), dim=0)
-
-        return masked_image, center_, scale_, rles, center_pad, scale_pad
-
     def _get_croped_image(self, image, bbox, bbox_pad, seg_mask):
         
         # Encode the mask for storing, borrowed from tao dataset
@@ -414,18 +262,6 @@ class TrackModel(nn.Module):
             masks[i, y1:y2, x1:x2] = 1
         return masks
 
-    def _generate_sam_masks(self, bboxes, image, img_height, img_width):
-        sam = sam_model_registry["vit_h"](checkpoint="path/to/sam_vit_h.pth")
-        predictor = SamPredictor(sam)
-        predictor.set_image(image)
-        
-        masks = []
-        for bbox in bboxes:
-            box = np.array([bbox[0], bbox[1], bbox[2], bbox[3]])
-            mask, _, _ = predictor.predict(box=box, multimask_output=False)
-            masks.append(mask[0])
-        return np.array(masks)
-
     def transl3d_to_weak_cam(self, pred_transl, eps=1e-6):
         """
         pred_transl : np.array shape (BS,3) = [t_x, t_y, t_z] issues de process_smpl
@@ -445,7 +281,21 @@ class TrackModel(nn.Module):
         cam_np = np.stack([scale, tx, ty], axis=1).astype(np.float32)
         return torch.from_numpy(cam_np)
 
-    def get_human_features(self, sat_data, image, frame_name, t_, measurments, gt=None, ann=None, extra_data=None):
+    def get_3D_cam(self, pred_cam, center=np.array([128, 128]), img_size = 256, scale = None, ):        
+        if(scale is not None): 
+            pass
+        else: 
+            scale = np.ones((pred_cam.size(0), 1))*256
+
+        dtype                  = pred_cam.dtype
+        device                 = pred_cam.device
+        focal_length           = self.focal * torch.ones(1, 2, device=device, dtype=dtype)
+        pred_cam_t         = torch.stack([pred_cam[:,1], pred_cam[:,2], 2*focal_length[:, 0]/(pred_cam[:,0]*torch.tensor(scale[:, 0], dtype=dtype, device=device) + 1e-9)], dim=1)
+        pred_cam_t[:, :2] += torch.tensor(center-img_size/2., dtype=dtype, device=device) * pred_cam_t[:, [2]] / focal_length
+
+        return pred_cam_t.to(self.device)
+    
+    def get_human_features(self, sat_data, image, frame_name, t_, measurments, conf_thresh, gt=None, ann=None, extra_data=None):
         """
         Get human features using SAT-HMR outputs directly and HMAR for appearance and UV maps.
         
@@ -462,7 +312,8 @@ class TrackModel(nn.Module):
         Returns:
             detection_data_list: List of Detection objects with human features.
         """
-        img_height, img_width, new_image_size, left, top = measurments
+        img_height, img_width, new_image_size = measurments
+        top, left = (new_image_size - img_height)//2, (new_image_size - img_width)//2
         ratio = 1.0 / int(new_image_size) * self.cfg.render.res
 
         # Extract SAT-HMR outputs (batch_size=1)
@@ -475,91 +326,45 @@ class TrackModel(nn.Module):
         pred_transl = sat_data['pred_transl'][0]  # [num_queries, 3]
         pred_intrinsic = sat_data['pred_intrinsics'][0]
         pred_cam_xys = sat_data['pred_cam_xys'][0]
+        pred_verts = sat_data['pred_verts'][0]
 
-        def adjust_boxes_to_original(boxes, orig_w=1280, orig_h=720, input_size=1288):
-            """
-            Ajuste les bounding boxes de l'image 1288x1288 vers l'image originale.
-            
-            Args:
-                boxes: Liste de bounding boxes [x1, y1, x2, y2] dans l'image 1288x1288
-                orig_w: Largeur originale (default: 1280)
-                orig_h: Hauteur originale (default: 720)
-                input_size: Taille d'entrée du modèle (default: 1288)
-            Returns:
-                adjusted_boxes: Bounding boxes ajustées pour l'image originale
-            """
-            pad_top_bottom = (orig_w - orig_h) // 2  # 140 pour 1280x720
-            scale_x = orig_w / input_size  # 1280 / 1288
-            scale_y = (orig_h + 2 * pad_top_bottom) / input_size  # 1000 / 1288
-            
-            adjusted_boxes = []
-            for box in boxes:
-                x1, y1, x2, y2 = box
-                # Étape 1 : Mapper vers l'image paddée
-                x1_pad = x1 * scale_x
-                y1_pad = y1 * scale_y
-                x2_pad = x2 * scale_x
-                y2_pad = y2 * scale_y
-                # Étape 2 : Retirer le padding du haut
-                x1_orig = x1_pad
-                y1_orig = y1_pad - pad_top_bottom
-                x2_orig = x2_pad
-                y2_orig = y2_pad - pad_top_bottom
-                # Étape 3 : Clipper
-                x1_orig = max(0, min(x1_orig, orig_w))
-                y1_orig = max(0, min(y1_orig, orig_h))
-                x2_orig = max(0, min(x2_orig, orig_w))
-                y2_orig = max(0, min(y2_orig, orig_h))
-                adjusted_boxes.append([x1_orig, y1_orig, x2_orig, y2_orig])
-            
-            return np.array(adjusted_boxes)
-        # Convert boxes to [x1, y1, x2, y2]
         cx, cy, w, h = pred_boxes[:, 0], pred_boxes[:, 1], pred_boxes[:, 2], pred_boxes[:, 3]
         x1 = (cx - w / 2) * new_image_size
         y1 = (cy - h / 2) * new_image_size
         x2 = (cx + w / 2) * new_image_size
         y2 = (cy + h / 2) * new_image_size
-        pred_bbox_1288 = torch.stack([x1, y1, x2, y2], dim=-1).cpu().numpy()
-        # Étape 2 : Ajustement vers l'image originale (720x1280)
+        pred_bbox = torch.stack([x1, y1, x2, y2], dim=-1).cpu().numpy()
 
-        pred_bbox = adjust_boxes_to_original(pred_bbox_1288, orig_w=img_width, orig_h=img_height, input_size=new_image_size)
-        
         # Filter detections based on score and size thresholds
         NPEOPLE = len(pred_confs)
         masked_image_list = []
         center_list = []
         scale_list = []
         rles_list = []
-        selected_ids = []
+        selected_ids = torch.where(sat_data['pred_confs'][0] > conf_thresh)[0].cpu().numpy()
         pred_classes = np.zeros(NPEOPLE, dtype=np.int64)  # Class 0 (person)
         ground_truth_track_id = [1] * NPEOPLE  # Default track IDs
         ground_truth_annotations = [[]] * NPEOPLE  # Default annotations
 
-        for p_ in range(NPEOPLE):
-            if pred_confs[p_] < self.cfg.phalp.low_th_c:
-                continue
+        for p_ in selected_ids:
             w = pred_bbox[p_][2] - pred_bbox[p_][0]
             h = pred_bbox[p_][3] - pred_bbox[p_][1]
             if w < self.cfg.phalp.small_w or h < self.cfg.phalp.small_h:
-                continue
+                w = self.cfg.phalp.small_w
+                h = self.cfg.phalp.small_h
             
             # Generate synthetic mask
-            mask = self._generate_synthetic_masks(pred_bbox[p_][None], img_height, img_width)[0]
+            mask = self.generate_mask_from_vertices(pred_verts[p_], pred_intrinsic, new_image_size)
             rle = mask_utils.encode(np.asfortranarray(mask.astype(np.uint8)))
             rle['counts'] = rle['counts'].decode('utf-8')
 
             # Compute center, scale, and cropped image for HMAR
-            center = np.array([(pred_bbox[p_][0] + pred_bbox[p_][2]) / 2, (pred_bbox[p_][1] + pred_bbox[p_][3]) / 2])
-            scale = np.array([w, h]) / self.cfg.render.res
             bbox = pred_bbox[p_]
-            bbox_pad = np.array([bbox[0] - w * 0.125, bbox[1] - h * 0.125, bbox[2] + w * 0.125, bbox[3] + h * 0.125])
-            masked_image, center_pad, scale_pad, _, _, _ = self.get_croped_image(image, bbox, bbox_pad, mask)
-            
+            masked_image, center_, scale_, rles, center_pad, scale_pad = self._get_croped_image(image, bbox, bbox, mask)
             masked_image_list.append(masked_image)
             center_list.append(center_pad)
             scale_list.append(scale_pad)
-            rles_list.append(rle)
-            selected_ids.append(p_)
+            rles_list.append(rles)
         
         if len(selected_ids) == 0:
             return []
@@ -574,7 +379,7 @@ class TrackModel(nn.Module):
                 hmar_out = self.HMAR(masked_image_list.cuda(), **extra_args)
                 uv_vector = hmar_out['uv_vector']  # [BS, 256, 256, 3]
                 appe_embedding = self.HMAR.autoencoder_hmar(uv_vector, en=True)  # [BS, embedding_dim]
-                appe_embedding  = appe_embedding.view(appe_embedding.shape[0], -1)
+                appe_embedding  = appe_embedding.view(appe_embedding.shape[0], -1).to(self.device)
 
         else:
             uv_vector = np.zeros((BS, 256, 256, 3))
@@ -599,39 +404,41 @@ class TrackModel(nn.Module):
             })
         
         pred_cam_np = self.transl3d_to_weak_cam(pred_cam_tensor.cpu().numpy())  # (BS,3) array
-
+        pred_cam = self.get_3D_cam(pred_cam_np,
+                                    center=(np.array(center_list) + np.array([left, top]))*ratio,
+                                    img_size=self.cfg.render.res,
+                                    scale=np.max(np.array(scale_list), axis=1, keepdims=True)*ratio)
         pred_joints_3d = pred_j3ds[selected_ids].cpu().numpy()  # [BS, num_joints, 3]
-        pred_joints_2d = pred_j2ds[selected_ids].cpu().numpy()  # [BS, num_joints, 2]
-        pred_cam = pred_transl[selected_ids].cpu().numpy()  # [BS, 3]
-        pred_cam_weak = []
+
         # Compute pose embedding
         if self.cfg.phalp.pose_distance == "joints":
             pose_embedding = torch.from_numpy(pred_joints_3d).view(BS, -1)
         elif self.cfg.phalp.pose_distance == "smpl":
             pose_embedding_list = []
             for i in range(BS):
-                pred_cam_weak.append(pred_cam_np[i])
                 emb_np = smpl_to_pose_camera_vector(
                     pred_smpl_params[i],      # dict avec rotmats + betas
-                    pred_cam_np[i]            # [scale, tx, ty]
+                    pred_cam[i]            # [scale, tx, ty]
                 )
                 pose_embedding_list.append(torch.from_numpy(emb_np[0]))
-            pose_embedding = torch.stack(pose_embedding_list, dim=0)
+            pose_embedding = torch.stack(pose_embedding_list, dim=0).to(self.device)
         else:
             raise ValueError("Unknown pose distance")
-        
+
         # Compute location embedding
+        pred_joints_2d = pred_j2ds[selected_ids]
         pred_joints_2d_ = pred_joints_2d.reshape(BS, -1) / self.cfg.render.res
         pred_cam_ = pred_cam.reshape(BS, -1)
-        loca_embedding = torch.cat((torch.from_numpy(pred_joints_2d_), torch.from_numpy(pred_cam_),
-                                torch.from_numpy(pred_cam_), torch.from_numpy(pred_cam_)), dim=1)
+        pred_joints_2d_.contiguous()
+        pred_cam_.contiguous()
+
+        loca_embedding = torch.cat((pred_joints_2d_, pred_cam_, pred_cam_, pred_cam_), dim=1).to(self.device)
 
         # Compute full embedding (for legacy)
-        full_embedding = torch.cat((appe_embedding.cpu(), pose_embedding, loca_embedding), dim=1)
-        
-        j2ds_smpl = pred_j2ds[selected_ids].cpu().numpy()  # [BS, 45, 2]
+        full_embedding = torch.cat((appe_embedding, pose_embedding, loca_embedding), dim=1)
+
         # convertis en 17 keypoints COCO
-        j2ds_coco = smpl45_to_coco17(j2ds_smpl)            # [BS, 17, 2]
+        j2ds_coco = smpl45_to_coco17(pred_joints_2d)            # [BS, 17, 2]
 
         # Create detection data list
         detection_data_list = []
@@ -654,10 +461,10 @@ class TrackModel(nn.Module):
                 "mask": rles_list[i],
                 "conf": pred_confs[p_].cpu().numpy(),
                 "appe": appe_embedding[i].cpu().numpy(),
-                "pose": pose_embedding[i].numpy(),
-                "loca": loca_embedding[i].numpy(),
+                "pose": pose_embedding[i].cpu().numpy(),
+                "loca": loca_embedding[i].cpu().numpy(),
                 "uv": uv_vector[i],
-                "embedding": full_embedding[i].numpy(),
+                "embedding": full_embedding[i].cpu().numpy(),
                 "center": center_list[i] + np.array([left, top]) * ratio,
                 "scale": scale_list[i] * ratio,
                 "smpl": pred_smpl_params[i],
@@ -894,3 +701,124 @@ class TrackModel(nn.Module):
                     raise FileNotFoundError(f"Failed to download {file_name} to {file_path}")
             else:
                 raise FileNotFoundError(f"{file_name} not found in {file_path} and no download URL provided")
+            
+
+
+def project_joints_2d(pred_joints_3d, cam_intrins, frame_size, input_size=1288):
+    """
+    Projects 3D joint coordinates into 2D image coordinates for a batch of predictions,
+    using the resizing method from adjust_keypoints_to_original.
+
+    Args:
+        pred_joints_3d (np.ndarray or torch.Tensor): Array of shape (B, num_joints, 3) or (num_joints, 3).
+        cam_intrins (torch.Tensor): 3x3 camera intrinsic matrix.
+        frame_size (tuple): (width, height) of the target frame (orig_w, orig_h).
+        input_size (int): size used during preprocessing (default: 1288).
+
+    Returns:
+        np.ndarray: Array of shape (B, num_joints, 2) with 2D pixel coordinates as int32.
+    """
+    # Ensure numpy input
+    if isinstance(pred_joints_3d, torch.Tensor):
+        joints_np = pred_joints_3d.cpu().numpy()
+    else:
+        joints_np = np.array(pred_joints_3d)
+
+    # Add batch dimension if needed
+    if joints_np.ndim == 2 and joints_np.shape[1] == 3:
+        joints_np = joints_np[np.newaxis, ...]
+    if joints_np.ndim != 3 or joints_np.shape[2] != 3:
+        raise ValueError("pred_joints_3d must have shape (B, num_joints, 3) or (num_joints, 3)")
+
+    B, num_joints, _ = joints_np.shape
+    orig_w, orig_h = frame_size
+
+    K = cam_intrins.float()
+    device = K.device
+
+    # Initialize output array
+    projections = np.zeros((B, num_joints, 2), dtype=np.int32)
+
+    # Process each sample in batch
+    for b in range(B):
+        joints = torch.from_numpy(joints_np[b]).float().to(device)
+        # Homogeneous projection
+        joints_homo = joints @ K.T
+        joints_2d = joints_homo[:, :2] / (joints_homo[:, 2:3] + 1e-6)
+
+        # Apply resizing from adjust_keypoints_to_original
+        pad_top_bottom = (orig_w - orig_h) // 2  # ex. (1280–720)//2 = 140 px
+        scale_x = orig_w / input_size  # ex. 1280/1288
+        scale_y = (orig_h + 2 * pad_top_bottom) / input_size  # ex. 1000/1288
+
+        coords = joints_2d.cpu().numpy()
+        adjusted_coords = []
+        for (x, y) in coords:
+            # 1) Stretch to padded image
+            x_pad = x * scale_x
+            y_pad = y * scale_y
+            # 2) Remove top padding
+            x_orig = x_pad
+            y_orig = y_pad - pad_top_bottom
+            # 3) Clip to original image
+            x_orig = np.clip(x_orig, 0, orig_w - 1)
+            y_orig = np.clip(y_orig, 0, orig_h - 1)
+            adjusted_coords.append([x_orig, y_orig])
+
+        projections[b] = np.array(adjusted_coords, dtype=np.int32)
+
+    return projections
+
+RADIUS_JOINT = 5
+KERNEL_JOINT = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*RADIUS_JOINT+1, 2*RADIUS_JOINT+1))
+
+def vis_pose(frame, pose_list, cam_intrins, frame_size, input_size=1288, point_radius=8):
+    frame = frame.copy()
+    frame_w, frame_h = frame_size
+    K = cam_intrins.float()
+    device = K.device
+
+    padded_h = frame_w
+    pad_top = (padded_h - frame_h) // 2 if padded_h > frame_h else 0
+    scale_factor = input_size / padded_h if padded_h > 0 else 1.0
+    expected_cy = input_size / 2
+    predicted_cy = K[1, 2]
+    cy_offset = (expected_cy - predicted_cy) * (frame_h / (input_size - 2 * pad_top * scale_factor + 1e-6))
+
+    # Prépare un masque unique pour la couleur verte
+    color = (0, 255, 0)  # Couleur verte
+    mask = np.zeros((frame_h, frame_w), np.uint8)
+
+    for joints_3d in pose_list:
+        if not isinstance(joints_3d, np.ndarray) or joints_3d.shape[-1] != 3:
+            print(f"Pose rejetée : Type={type(joints_3d)}, Shape={getattr(joints_3d, 'shape', 'N/A')}")
+            if isinstance(joints_3d, torch.Tensor):
+                joints_3d = joints_3d.cpu().numpy()
+            else:
+                continue
+
+        joints = torch.from_numpy(joints_3d).float().to(device)
+        if joints.dim() == 3:
+            joints = joints.squeeze(0)
+
+        joints_homo = joints @ K.T
+        joints_2d_resized = joints_homo[:, :2] / (joints_homo[:, 2:3] + 1e-6)
+
+        joints_2d_adjusted = joints_2d_resized.clone()
+        joints_2d_adjusted[:, 0] = joints_2d_resized[:, 0] * (frame_w / input_size)
+        joints_2d_adjusted[:, 1] = (joints_2d_resized[:, 1] - pad_top * scale_factor) * \
+                                  (frame_h / (input_size - 2 * pad_top * scale_factor + 1e-6)) + cy_offset
+
+        coords = joints_2d_adjusted.cpu().numpy()
+        coords = np.clip(coords, [0, 0], [frame_w - 1, frame_h - 1]).astype(np.int32)
+
+        # Place les points sur le masque
+        ix = coords[:, 0]
+        iy = coords[:, 1]
+        mask[iy, ix] = 255
+
+    # Dilate le masque et applique la couleur verte
+    dilated_mask = cv2.dilate(mask, KERNEL_JOINT, iterations=1)
+    frame[dilated_mask == 255] = (0, 255, 0)  # Couleur verte
+
+    return frame

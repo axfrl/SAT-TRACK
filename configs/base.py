@@ -10,7 +10,7 @@ print("weights_dir", WEIGHTS_DIR)
 
 @dataclass
 class VideoConfig:
-    source: str = '/home/alphafalcon/Videos/septime/input'
+    source: str = '/home/alphafalcon/Videos/septime/input/bolchoi(2).mp4'
     output_dir: str = '/home/alphafalcon/Videos/septime/output'
     extract_video: bool = True
     base_path: Optional[str] = None

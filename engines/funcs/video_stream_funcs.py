@@ -77,8 +77,9 @@ def find_input_video(input_dir):
     video_files = []
     for ext in video_extensions:
         video_files.extend(glob.glob(os.path.join(input_dir, ext)))
-    if not video_files:
-        raise ValueError(f"No video files found in {input_dir}")
+    #if not video_files:
+        #raise ValueError(f"No video files found in {input_dir}")
+        #continue
     if len(video_files) > 1:
         print(f"Multiple videos found in {input_dir}. Using: {video_files[0]}")
     return video_files[0]

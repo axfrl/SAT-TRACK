@@ -699,8 +699,6 @@ class Model(nn.Module):
         pred_j2ds = torch.stack(outputs_j2ds)
         pred_depths = torch.stack(outputs_depths)
 
-
-
         if self.training > 0 and self.use_dn:
             pred_poses, pred_betas,\
             pred_boxes, pred_confs,\

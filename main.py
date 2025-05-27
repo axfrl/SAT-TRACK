@@ -17,13 +17,13 @@ def main(cfg: DictConfig):
             print(f"Warning: input_size ({cfg.sathmr.input_size}) is not divisible by {patch_size * 4}.")
 
     # Get input and output video paths
-    input_video = find_input_video(cfg.video.source)
-    output_video = get_output_video_path(input_video, cfg.video.output_dir)
+    # input_video = find_input_video(cfg.video.source)
+    #output_video = get_output_video_path(input_video, cfg.video.output_dir)
 
     # Initialize and run the engine with SAT-HMR configuration
     engine = Engine(cfg, mode=cfg.sathmr.mode, gpu_id=cfg.sathmr.gpu_id)
     if cfg.mode == "infer":
-        engine.infer_video(input_video, output_video, cfg.sathmr.input_size, cfg.sathmr.conf_thresh, cfg.sathmr.display)
+        engine.infer_video(cfg.video.source, cfg.video.output_dir, cfg.sathmr.input_size, cfg.sathmr.conf_thresh, cfg.sathmr.display)
     else:
         engine.create_posetrack_json(cfg.eval_data_dir, cfg.eval_out_path)
 if __name__ == "__main__":

@@ -239,7 +239,6 @@ def render_mesh(height, width, meshes, face, cam_intrinsics, colors = None):
 
         scene.add(mesh, f'mesh_{i}')
 
-
     # camera
     f=np.array([cam_intrinsics[0,0],cam_intrinsics[1,1]])
     c=cam_intrinsics[0:2,2]
@@ -258,107 +257,105 @@ KERNEL_VERT = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*RADIUS_VERT+1, 2*R
 RADIUS_JOINT = 5
 KERNEL_JOINT = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*RADIUS_JOINT+1, 2*RADIUS_JOINT+1))
 
-def vis_vertices_img(frame, verts_cam_list, cam_intrinsics, frame_size):
-    ORIG_W, ORIG_H = frame_size
-    PADDED_H = ORIG_W
-    PAD_TOP = (PADDED_H - ORIG_H) // 2
-    input_size = 1288  # taille d'entrée du modèle
-    SCALE_FACTOR = input_size / PADDED_H
-    EXPECTED_CY = input_size / 2
-    N_SAMPLES = 100000
+def vis_vertices_img(frame, verts_cam_list, cam_intrinsics, input_size=1288, radius=3, color=(0, 255, 0), max_points=100000):
+    """
+    Affiche les projections 2D des vertices 3D sur une image sans padding ni resizing.
 
+    frame : np.ndarray — image BGR (H, W, 3)
+    verts_cam_list : list of np.ndarray (N_i, 3) or torch.Tensor — liste de vertices 3D en cam-space
+    cam_intrinsics : torch.Tensor (3, 3) — matrice intrinsèque
+    input_size : int — taille de l'image d'entrée (souvent utilisée dans preprocessing)
+    radius : int — rayon des points visibles sur l'image
+    color : tuple — couleur en BGR
+    max_points : int — nombre max de vertices à afficher (échantillonnage aléatoire si dépasse)
+    """
     frame_h, frame_w = frame.shape[:2]
 
-    # 1) concat tous les points en numpy directement 
+    # 1) Concaténation de tous les vertices
     all_verts = np.vstack([
         v.squeeze(0) if v.ndim == 3 else v
         for v in verts_cam_list
-    ]).astype(np.float32)  # (N,3)
+    ])
+    if torch.is_tensor(all_verts):
+        all_verts = all_verts.detach().cpu().numpy()
+    all_verts = all_verts.astype(np.float32)  # (N, 3)
 
-    if all_verts.shape[0] > N_SAMPLES:
-        idx = np.random.choice(all_verts.shape[0], N_SAMPLES, replace=False)
+    # 2) Échantillonnage si trop de points
+    if all_verts.shape[0] > max_points:
+        idx = np.random.choice(all_verts.shape[0], max_points, replace=False)
         all_verts = all_verts[idx]
-    # 2) projection homogène en numpy
-    K = cam_intrinsics.cpu().numpy().astype(np.float32)
-    verts_homo = all_verts @ K.T                # (N,3)
-    pts2d = verts_homo[:, :2] / (verts_homo[:, 2:] + 1e-6)  # (N,2)
 
-    # 3) ajustement de l’offset en y
-    predicted_cy = K[1,2]
-    cy_offset = (EXPECTED_CY - predicted_cy) * (frame_h / (input_size - 2 * PAD_TOP * SCALE_FACTOR))
+    # 3) Projection perspective simple avec offset vertical
+    K = cam_intrinsics.detach().cpu().numpy().astype(np.float32).copy()
+    cy_offset = (input_size - frame_h) * 2
+    K[1, 2] += cy_offset  # Application du décalage vertical
 
-    # 4) passage à l’échelle vers la taille de la frame
-    xs = pts2d[:,0] * (frame_w / input_size)
-    ys = (pts2d[:,1] - PAD_TOP * SCALE_FACTOR) * (frame_h / (input_size - 2 * PAD_TOP * SCALE_FACTOR))
-    ys += cy_offset
+    verts_proj = all_verts @ K.T  # (N, 3)
+    pts2d = verts_proj[:, :2] / (verts_proj[:, 2:] + 1e-6)  # (N, 2)
 
-    # 5) clipping et entiers
-    ix = np.clip(xs, 0, frame_w - 1).astype(np.int32)
-    iy = np.clip(ys, 0, frame_h - 1).astype(np.int32)
+    # 4) Clipping à l'image
+    ix = np.clip(pts2d[:, 0], 0, frame_w - 1).astype(np.int32)
+    iy = np.clip(pts2d[:, 1], 0, frame_h - 1).astype(np.int32)
 
-    # 6) masque binaire + dilatation pour faire des “cercles”
-    mask = np.zeros((frame_h, frame_w), np.uint8)
+    # 5) Création du masque
+    mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
     mask[iy, ix] = 255
     mask = cv2.dilate(mask, KERNEL_VERT, iterations=1)
 
-    # 7) application du rendu vert
-    frame[mask == 255] = (0, 255, 0)
-    return frame
+    # 6) Application de la couleur sur l’image
+    vis_frame = frame.copy()
+    vis_frame[mask == 255] = color
 
-def vis_vertices_img_with_tracked_pose(frame, tracked_poses, cam_intrins, frame_size, colors, input_size=1288, point_radius=8):
+    return vis_frame
+
+def vis_pose_img(frame, tracked_poses, cam_intrins, colors, point_radius=6):
+    """
+    Affiche les joints 3D projetés en 2D avec couleur par ID, sans redimensionnement/padding.
+
+    frame : np.ndarray — image BGR (H, W, 3)
+    tracked_poses : dict[int, np.ndarray] — dictionnaire {id: joints_cam (N,3)}
+    cam_intrins : torch.Tensor (3,3) — matrice intrinsèque
+    colors : dict[int, tuple] — dictionnaire {id: (B,G,R)}
+    point_radius : int — rayon des points dessinés
+    """
     frame = frame.copy()
-    frame_w, frame_h = frame_size
-    K = cam_intrins.float()
-    device = K.device
+    frame_h, frame_w = frame.shape[:2]
+    K = cam_intrins.float().cpu().numpy().astype(np.float32)
 
-    padded_h = frame_w
-    pad_top = (padded_h - frame_h) // 2 if padded_h > frame_h else 0
-    scale_factor = input_size / padded_h if padded_h > 0 else 1.0
-    expected_cy = input_size / 2
-    predicted_cy = K[1, 2]
-    cy_offset = (expected_cy - predicted_cy) * (frame_h / (input_size - 2 * pad_top * scale_factor + 1e-6))
-
-    # D'abord, on prépare un dictionnaire {color: mask}
+    # Prépare un dictionnaire de masques binaires par couleur
     color_to_mask = {}
 
     for id, joints_3d in tracked_poses.items():
+        if isinstance(joints_3d, torch.Tensor):
+            joints_3d = joints_3d.detach().cpu().numpy()
         if not isinstance(joints_3d, np.ndarray) or joints_3d.shape[-1] != 3:
-            print(f"Joints ID {id} rejetés : Type={type(joints_3d)}, Shape={getattr(joints_3d, 'shape', 'N/A')}")
-            if isinstance(joints_3d, torch.Tensor):
-                joints_3d = joints_3d.cpu().numpy()
-            else:
-                continue
+            continue
 
-        joints = torch.from_numpy(joints_3d).float().to(device)
-        if joints.dim() == 3:
-            joints = joints.squeeze(0)
+        # Format standard : (N,3)
+        if joints_3d.ndim == 3:
+            joints_3d = joints_3d.squeeze(0)
 
-        joints_homo = joints @ K.T
-        joints_2d_resized = joints_homo[:, :2] / (joints_homo[:, 2:3] + 1e-6)
+        joints_3d = joints_3d.astype(np.float32)
 
-        joints_2d_adjusted = joints_2d_resized.clone()
-        joints_2d_adjusted[:, 0] = joints_2d_resized[:, 0] * (frame_w / input_size)
-        joints_2d_adjusted[:, 1] = (joints_2d_resized[:, 1] - pad_top * scale_factor) * \
-                                  (frame_h / (input_size - 2 * pad_top * scale_factor + 1e-6)) + cy_offset
+        # Projection perspective : K @ [X,Y,Z]
+        joints_homo = joints_3d @ K.T  # (N,3)
+        joints_2d = joints_homo[:, :2] / (joints_homo[:, 2:3] + 1e-6)
 
-        coords = joints_2d_adjusted.cpu().numpy()
-        coords = np.clip(coords, [0, 0], [frame_w - 1, frame_h - 1]).astype(np.int32)
+        # Clipping à la taille de l’image
+        coords = np.clip(joints_2d, [0, 0], [frame_w - 1, frame_h - 1]).astype(np.int32)
 
         color = colors.get(id, (255, 255, 255))
-
-        # Initie un masque pour cette couleur si pas encore créé
         if color not in color_to_mask:
-            color_to_mask[color] = np.zeros((frame_h, frame_w), np.uint8)
+            color_to_mask[color] = np.zeros((frame_h, frame_w), dtype=np.uint8)
 
-        # Place tous les points pour cet ID sur son masque
         ix = coords[:, 0]
         iy = coords[:, 1]
         color_to_mask[color][iy, ix] = 255
 
-    # Ensuite pour chaque couleur, on dilate le masque puis on l'applique
+    # Applique chaque masque par couleur avec dilatation
     for color, mask in color_to_mask.items():
-        dilated_mask = cv2.dilate(mask, KERNEL_JOINT, iterations=1)
-        frame[dilated_mask == 255] = color
+        dilated = cv2.dilate(mask, KERNEL_JOINT, iterations=1)
+        frame[dilated == 255] = color
 
     return frame
 
