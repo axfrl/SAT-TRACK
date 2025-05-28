@@ -504,7 +504,7 @@ class TrackModel(nn.Module):
                 en_pose          = en_pose.unsqueeze(0) # (BS, 7, pose_dim)
                 en_time          = en_time.unsqueeze(0) # (BS, 7)
                 en_data          = en_data.unsqueeze(0) # (BS, 7, 6)
-            
+
             with torch.no_grad():
                 pose_pred = self.pose_predictor.predict_next(en_pose, en_data, en_time, time)
             

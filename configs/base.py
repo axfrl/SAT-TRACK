@@ -10,7 +10,7 @@ print("weights_dir", WEIGHTS_DIR)
 
 @dataclass
 class VideoConfig:
-    source: str = '/home/alphafalcon/Videos/septime/input/bolchoi(2).mp4'
+    source: str = '/home/alphafalcon/Videos/septime/input/000522_mpii_test'
     output_dir: str = '/home/alphafalcon/Videos/septime/output'
     extract_video: bool = True
     base_path: Optional[str] = None
@@ -125,7 +125,7 @@ class SATHMRConfig:
     infer_batch_size: int = 1
     infer_num_workers: int = 8
     distributed_infer: bool = True
-    conf_thresh: float = 0.2
+    conf_thresh: float = 0.17
     display: bool = False
     live_stream: bool = True
     use_fp16: bool = False
@@ -168,6 +168,7 @@ class FullConfig:
     base_tracker: str = "PHALP"
     train: bool = False
     mode: str = "eval"
+    conf_thresh: list[float] = field(default_factory=lambda: [0.16, 0.17, 0.18, 0.19])
     eval_data_dir: str = "/home/alphafalcon/tracker/code/SAT-TRACK/datasets/PoseTrack21-main/images/val"
     eval_out_path: str = "/home/alphafalcon/tracker/code/SAT-TRACK/eval_result"
     debug: bool = False

@@ -184,8 +184,6 @@ class Engine:
         confs = outputs['pred_confs'][0].view(-1)
         if (mask := confs > conf_thresh).any():
             verts = [outputs['pred_verts'][0,i].cpu().numpy() for i,v in enumerate(confs) if mask[i]]
-            print(target[0]["img_size"][0], target[0]["img_size"][1])
-            print(frame.shape)
             img_size = target[0]["img_size"]
             frame = vis_vertices_img(img, verts, K)
             frame = vis_pose_img(frame, detec_pose, K, self.phalp_tracker.color_dict)[:target[0]["img_size"][0], :target[0]["img_size"][1]]
@@ -467,5 +465,13 @@ class Engine:
 
             print(f"✅ JSON scène écrit : {output_path} ({len(images)} images, {len(annotations)} annotations)")
 
+    def eval(self, conf_thresh_list, root_eval_dir, base_output_json_dir):
+        for conf_thresh in conf_thresh_list:
+            print(f"\n🔁 Traitement pour conf_thresh = {conf_thresh}")
+            self.conf_thresh = conf_thresh  # Si _process_scene utilise ce seuil
+
+            # Crée un sous-dossier pour ce seuil
+            output_json_dir = os.path.join(base_output_json_dir, f"conf_{conf_thresh:.2f}")
+            self.create_posetrack_json(root_eval_dir, output_json_dir)
 
 

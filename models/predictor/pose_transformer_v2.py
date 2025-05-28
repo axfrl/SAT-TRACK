@@ -381,22 +381,25 @@ class Pose_transformer_v2(nn.Module):
         has_detection_ = torch.zeros(en_pose.shape[0], self.cfg.frame_length, n_p, 1)
         mask_detection_ = torch.zeros(en_pose.shape[0], self.cfg.frame_length, n_p, 1)
         
-        # loop thorugh each person and construct the input data
+        # loop through each person and construct the input data
         t_end = []
         for p_ in range(en_time.shape[0]):
             t_min = en_time[p_].min()
             # loop through time 
             for t_ in range(en_time.shape[1]):
                 # get the time from start.
-                t = min(en_time[p_, t_] - t_min, self.cfg.frame_length - 1)
-                
+                t_candidate = en_time[p_, t_] - t_min
+                t = torch.minimum(t_candidate, torch.tensor(self.cfg.frame_length - 1, device=t_candidate.device))
                 # get the pose
                 pose_shape_[p_, t, 0, :] = en_pose[p_, t_, :]
-                
+
                 # get the mask
                 has_detection_[p_, t, 0, :] = 1
-            t_end.append(t.item())
-            
+            try:
+                t_end.append(t.item())
+            except:
+                print(t)
+                print(en_time)
         input_data = {
             "pose_shape" : (pose_shape_ - self.mean_[:, :, None, :]) / (self.std_[:, :, None, :] + 1e-10),
             "has_detection" : has_detection_,

@@ -25,6 +25,6 @@ def main(cfg: DictConfig):
     if cfg.mode == "infer":
         engine.infer_video(cfg.video.source, cfg.video.output_dir, cfg.sathmr.input_size, cfg.sathmr.conf_thresh, cfg.sathmr.display)
     else:
-        engine.create_posetrack_json(cfg.eval_data_dir, cfg.eval_out_path)
+        engine.eval(cfg.conf_thresh, cfg.eval_data_dir, cfg.eval_out_path)
 if __name__ == "__main__":
     main()
